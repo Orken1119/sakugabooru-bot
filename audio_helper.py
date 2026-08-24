@@ -20,39 +20,7 @@ def get_media_duration(file_path):
     except Exception:
         return None
 
-def search_and_download_nyaa_torrent(anime_title, output_dir="sakugabooru-episodes"):
-    """
-    Queries Nyaa.si RSS API for anime_title sorted by most downloads, downloads .torrent file to output_dir.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    clean_title = anime_title.replace('_', ' ').replace('-', ' ').strip()
-    query = f"{clean_title} 1080p"
-    rss_url = f"https://nyaa.si/?page=rss&q={requests.utils.quote(query)}&c=1_2&f=0"
-
-    print(f"[*] Searching Nyaa.si for: '{query}'...")
-    try:
-        res = requests.get(rss_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=12)
-        if res.status_code == 200:
-            root = ET.fromstring(res.text)
-            items = root.findall('.//item')
-            if items:
-                top_item = items[0]
-                torrent_title = top_item.find('title').text
-                torrent_link = top_item.find('link').text
-
-                torrent_res = requests.get(torrent_link, timeout=15)
-                if torrent_res.status_code == 200:
-                    clean_filename = "".join(c for c in torrent_title if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
-                    torrent_filepath = os.path.join(output_dir, f"{clean_filename}.torrent")
-                    with open(torrent_filepath, 'wb') as f:
-                        f.write(torrent_res.content)
-
-                    print(f"[+] Nyaa Torrent Found & Saved: {torrent_filepath}")
-                    return torrent_filepath
-    except Exception as e:
-        print("[!] Nyaa search error:", e)
-
-    return None
+from nyaa_downloader import search_and_download_nyaa
 
 def find_local_episode_file(anime_name, episodes_dir="sakugabooru-episodes"):
     """
@@ -121,7 +89,7 @@ def fetch_and_add_audio(video_path, anime_name):
 
     # Step 2: If no local episode file, fetch Nyaa .torrent file
     print(f"[!] No local episode file found in '{episodes_dir}/'. Automated Nyaa Search...")
-    torrent_file = search_and_download_nyaa_torrent(anime_name, output_dir=episodes_dir)
+    torrent_file = search_and_download_nyaa(anime_name, output_dir=episodes_dir, auto_open=True)
 
     if torrent_file:
         print(f"[!] ACTION REQUIRED: Torrent saved to '{torrent_file}'. Open in your torrent client, save episode to '{episodes_dir}/', and re-run main.py.")
