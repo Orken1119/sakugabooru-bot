@@ -114,6 +114,9 @@ def boorurandom(retries=0):
         final_video = add_ost_to_video(raw_video, animename)
         if not final_video:
             final_video = raw_video  # fallback: clip without music
+        elif final_video != raw_video and os.path.exists(raw_video):
+            # Auto-delete raw video after OST is merged
+            os.remove(raw_video)
 
         # Format tweet text — proper sakuga credit format
         animator_credit = f"Key Animation: {animatorname}" if animatorname != "Unknown" else ""
