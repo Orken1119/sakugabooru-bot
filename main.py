@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from pybooru import Moebooru
 from dotenv import load_dotenv
 from audio_helper import fetch_and_add_audio
+from music_helper import add_lofi_to_video
 from config import connect_api
 
 load_dotenv()
@@ -20,6 +21,9 @@ header = {
     'Accept-Language': 'en-US,en;q=0.5'
 }
 client = Moebooru(site_url='https://www.sakugabooru.com')
+
+# Only pick posts the sakugabooru community rated as exceptional
+SCORE_FILTER = "score:>100"
 
 
 def grab_post_metadata(posturl):
@@ -78,10 +82,10 @@ def boorurandom(retries=0):
     # Bug #7 Fix: was `return boorurandom()` with no limit — stack overflow risk
     if retries > 10:
         print("[!] Max retries reached — could not find an MP4 post. Giving up.")
-        return
+        return None
 
     try:
-        files = client.post_list(tags="order:random -western")
+        files = client.post_list(tags=f"order:random -western {SCORE_FILTER}")
         mp4_files = [f for f in files if filetypechecker(f.get('file_url', ''))]
         if not mp4_files:
             print(f"No mp4 files found in this batch, retrying... (attempt {retries + 1}/10)")
@@ -106,8 +110,22 @@ def boorurandom(retries=0):
 
         raw_video = fetch_and_add_audio(video_path, animename, source_url=source_url)
 
-        params = "Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\nRaw Audio Video: {}\n".format(
-            animatorname, animename, tags, posturl, raw_video
+        # Add lofi music with fade in/out
+        final_video = add_lofi_to_video(raw_video)
+        if not final_video:
+            final_video = raw_video  # fallback: use clip without music
+
+        # Format tweet text — proper sakuga credit format
+        animator_credit = f"Key Animation: {animatorname}" if animatorname != "Unknown" else ""
+        tweet_text = (
+            f"{animator_credit}\n"
+            f"Anime: {animename.split(',')[0].strip().title()}\n"
+            f"\n"
+            f"#sakuga #anime #keyanimation"
+        ).strip()
+
+        params = "Tweet Text:\n{}\n\nPost URL: {}\nFinal Video: {}\n".format(
+            tweet_text, posturl, final_video
         )
         print("Extracted Metadata:\n" + params)
 
