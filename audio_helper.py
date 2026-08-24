@@ -1,5 +1,6 @@
 import os
 import glob
+import time
 import subprocess
 import requests
 import xml.etree.ElementTree as ET
@@ -53,7 +54,6 @@ def fetch_scene_timestamp(video_path):
                 ep_num = match.get('episode')
                 filename = match.get('filename', '')
 
-                # Calculate start_sec for t=0.0s
                 start_sec = max(0.0, (at_sec - seek_time))
                 return start_sec, filename, ep_num, match
 
@@ -65,37 +65,36 @@ def fetch_scene_timestamp(video_path):
 
     return None, None, None, None
 
-def find_local_episode_file(anime_name, episodes_dir="sakugabooru-episodes"):
+def find_local_episode_file(anime_name, search_dirs=["sakugabooru-episodes", "/home/orken/Downloads"]):
     """
-    Searches episodes_dir for local .mkv / .mp4 / .avi files matching anime_name.
+    Searches episodes_dir and Downloads for local .mkv / .mp4 / .avi files matching anime_name.
     """
-    if not os.path.exists(episodes_dir):
-        return None
-
-    video_extensions = ['*.mkv', '*.mp4', '*.avi']
-    local_files = []
-    for ext in video_extensions:
-        local_files.extend(glob.glob(os.path.join(episodes_dir, ext)))
-        local_files.extend(glob.glob(os.path.join(episodes_dir, '**', ext), recursive=True))
-
-    if not local_files:
-        return None
-
     clean_search = anime_name.lower().replace('_', ' ').replace('-', ' ').strip()
     words = [w for w in clean_search.split() if len(w) > 2 and w not in ('the', 'and', 'for', 'series')]
-    for f in local_files:
-        filename_lower = os.path.basename(f).lower()
-        if words and any(w in filename_lower for w in words):
-            return f
+
+    video_extensions = ['*.mkv', '*.mp4', '*.avi']
+    for d in search_dirs:
+        if not os.path.exists(d):
+            continue
+        local_files = []
+        for ext in video_extensions:
+            local_files.extend(glob.glob(os.path.join(d, ext)))
+            local_files.extend(glob.glob(os.path.join(d, '**', ext), recursive=True))
+
+        for f in local_files:
+            filename_lower = os.path.basename(f).lower()
+            if words and any(w in filename_lower for w in words):
+                return f
 
     return None
 
 def fetch_and_add_audio(video_path, anime_name):
     """
-    100% Automated Local Episode Audio Engine:
-    1. Checks sakugabooru-episodes/ for local .mkv / .mp4 file.
-    2. If found, slices exact 100% studio master audio track using ffmpeg.
-    3. If not found, downloads Nyaa .torrent file and auto-launches client.
+    Automated Local Episode Audio Engine with Download Completion Polling:
+    1. Gets exact episode timestamp from Trace.moe.
+    2. Searches sakugabooru-episodes/ and Downloads for matching local episode file.
+    3. If missing, downloads Nyaa torrent and polls for completion.
+    4. Slices exact 20s audio track using ffmpeg and merges.
     """
     video_duration = get_media_duration(video_path) or 10.0
     episodes_dir = "sakugabooru-episodes"
@@ -105,10 +104,26 @@ def fetch_and_add_audio(video_path, anime_name):
 
     start_sec, trace_filename, ep_num, match_info = fetch_scene_timestamp(video_path)
     search_name = trace_filename or anime_name
-
-    # Step 1: Check for local episode file in sakugabooru-episodes/
-    local_ep_file = find_local_episode_file(search_name, episodes_dir=episodes_dir)
     raw_output_path = video_path.replace(".mp4", "_raw_audio.mp4")
+
+    # Step 1: Check for local episode file
+    local_ep_file = find_local_episode_file(search_name)
+
+    # Step 2: If missing, launch Nyaa torrent and poll for download completion
+    if not local_ep_file:
+        print(f"[!] Local episode file not found yet. Launching Nyaa search for Episode {ep_num}...")
+        torrent_file = search_and_download_nyaa(search_name, episode_num=ep_num, output_dir=episodes_dir, auto_open=True)
+
+        if torrent_file:
+            print("[*] Waiting for qBittorrent download to complete (polling every 3s)...")
+            max_wait_seconds = 120
+            poll_start = time.time()
+            while (time.time() - poll_start) < max_wait_seconds:
+                local_ep_file = find_local_episode_file(search_name)
+                if local_ep_file and os.path.exists(local_ep_file):
+                    print(f"[+] Download Completed! Episode File Detected: {local_ep_file}")
+                    break
+                time.sleep(3)
 
     if local_ep_file and os.path.exists(local_ep_file):
         print(f"[*] Local Episode File Matched: {local_ep_file}")
@@ -135,13 +150,5 @@ def fetch_and_add_audio(video_path, anime_name):
         except Exception as e:
             print("[!] Local audio slicing error:", e)
 
-    # Step 2: If no local episode file, fetch exact episode Nyaa .torrent file
-    print(f"[!] No local episode file found in '{episodes_dir}/'. Automated Nyaa Search for Episode {ep_num}...")
-    torrent_file = search_and_download_nyaa(search_name, episode_num=ep_num, output_dir=episodes_dir, auto_open=True)
-
-    if torrent_file:
-        print(f"[+] Automated Torrent Saved & Opened: '{torrent_file}'")
-    else:
-        print(f"[!] Place episode MKV/MP4 into '{episodes_dir}/' and re-run main.py to slice audio.")
-
+    print(f"[!] Save completed episode MKV/MP4 into '{episodes_dir}/' or 'Downloads/' to finish audio merging.")
     return video_path
