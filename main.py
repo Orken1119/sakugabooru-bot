@@ -24,8 +24,8 @@ client = Moebooru(site_url='https://www.sakugabooru.com')
 
 def grab_post_metadata(posturl):
     """
-    Bug #6 Fix: fetches the Sakugabooru post page ONCE and extracts both
-    artist name and anime name in a single HTTP request (was two separate requests).
+    Fetches the Sakugabooru post page ONCE and extracts artist name and anime name
+    in a single HTTP request.
     Returns (artist_str, anime_str).
     """
     artist_str = "Unknown"
@@ -91,19 +91,20 @@ def boorurandom(retries=0):
         boorurl = choice['file_url']
         tags = choice['tags']
         posturl = siteurl + "{0}".format(choice['id'])
+        source_url = choice.get('source', '')  # e.g. 'https://youtube.com/...' or '#06 (BD)'
 
-        # Bug #6 Fix: one HTTP request instead of two
         animatorname, animename = grab_post_metadata(posturl)
         time.sleep(5)
 
         os.makedirs("sakugabooru-video-files", exist_ok=True)
         data = requests.get(boorurl, headers=header)
         print("data:", data.status_code)
+        print("source:", source_url)
         video_path = "sakugabooru-video-files/{}.mp4".format(choice['id'])
         with open(video_path, 'wb') as file:
             file.write(data.content)
 
-        raw_video = fetch_and_add_audio(video_path, animename)
+        raw_video = fetch_and_add_audio(video_path, animename, source_url=source_url)
 
         params = "Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\nRaw Audio Video: {}\n".format(
             animatorname, animename, tags, posturl, raw_video
