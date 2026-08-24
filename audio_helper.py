@@ -65,7 +65,41 @@ def fetch_scene_timestamp(video_path):
 
     return None, None, None, None
 
-def find_local_episode_file(anime_name, search_dirs=["sakugabooru-episodes", "/home/orken/Downloads"]):
+def is_download_complete(filepath):
+    """
+    Deep Download Completion Verification:
+    1. Checks that file exists and does NOT have incomplete extension (.!qB, .part, .crdownload).
+    2. Verifies file size is stable (not growing) over a 1.2-second interval.
+    3. Verifies file is readable and non-empty.
+    """
+    if not filepath or not os.path.exists(filepath):
+        return False
+
+    if filepath.endswith(('.!qB', '.qB', '.part', '.crdownload', '.tmp')):
+        return False
+
+    try:
+        size1 = os.path.getsize(filepath)
+        if size1 < 1024 * 1024:  # Must be at least 1MB to be a valid video
+            return False
+
+        time.sleep(1.2)
+        size2 = os.path.getsize(filepath)
+
+        # File is still actively being written to by qBittorrent if size is changing
+        if size1 != size2:
+            return False
+
+        # Attempt to read EOF to confirm file handle integrity
+        with open(filepath, 'rb') as f:
+            f.seek(-1, os.SEEK_END)
+            f.read(1)
+
+        return True
+    except Exception:
+        return False
+
+def find_local_episode_file(anime_name, search_dirs=["sakugabooru-episodes", "/home/orken/Downloads"], require_complete=False):
     """
     Searches episodes_dir and Downloads for local .mkv / .mp4 / .avi files matching anime_name.
     """
@@ -84,16 +118,17 @@ def find_local_episode_file(anime_name, search_dirs=["sakugabooru-episodes", "/h
         for f in local_files:
             filename_lower = os.path.basename(f).lower()
             if words and any(w in filename_lower for w in words):
-                return f
+                if not require_complete or is_download_complete(f):
+                    return f
 
     return None
 
 def fetch_and_add_audio(video_path, anime_name):
     """
-    Automated Local Episode Audio Engine with Download Completion Polling:
+    Automated Local Episode Audio Engine with Deep Completion Verification:
     1. Gets exact episode timestamp from Trace.moe.
-    2. Searches sakugabooru-episodes/ and Downloads for matching local episode file.
-    3. If missing, downloads Nyaa torrent and polls for completion.
+    2. Checks for finished local episode file.
+    3. If missing, launches Nyaa torrent and polls until download completion is VERIFIED.
     4. Slices exact 20s audio track using ffmpeg and merges.
     """
     video_duration = get_media_duration(video_path) or 10.0
@@ -106,27 +141,28 @@ def fetch_and_add_audio(video_path, anime_name):
     search_name = trace_filename or anime_name
     raw_output_path = video_path.replace(".mp4", "_raw_audio.mp4")
 
-    # Step 1: Check for local episode file
-    local_ep_file = find_local_episode_file(search_name)
+    # Step 1: Check for verified complete local episode file
+    local_ep_file = find_local_episode_file(search_name, require_complete=True)
 
-    # Step 2: If missing, launch Nyaa torrent and poll for download completion
+    # Step 2: If missing or downloading, launch Nyaa torrent and poll for download completion
     if not local_ep_file:
-        print(f"[!] Local episode file not found yet. Launching Nyaa search for Episode {ep_num}...")
+        print(f"[!] Verified complete local episode file not found. Launching Nyaa search for Episode {ep_num}...")
         torrent_file = search_and_download_nyaa(search_name, episode_num=ep_num, output_dir=episodes_dir, auto_open=True)
 
         if torrent_file:
-            print("[*] Waiting for qBittorrent download to complete (polling every 3s)...")
-            max_wait_seconds = 120
+            print("[*] Waiting for qBittorrent download completion verification (polling file stability every 3s)...")
+            max_wait_seconds = 180
             poll_start = time.time()
             while (time.time() - poll_start) < max_wait_seconds:
-                local_ep_file = find_local_episode_file(search_name)
-                if local_ep_file and os.path.exists(local_ep_file):
-                    print(f"[+] Download Completed! Episode File Detected: {local_ep_file}")
+                candidate = find_local_episode_file(search_name, require_complete=True)
+                if candidate:
+                    local_ep_file = candidate
+                    print(f"[+] Download Completion 100% Verified! Episode File Detected: {local_ep_file}")
                     break
                 time.sleep(3)
 
     if local_ep_file and os.path.exists(local_ep_file):
-        print(f"[*] Local Episode File Matched: {local_ep_file}")
+        print(f"[*] Verified Local Episode File Matched: {local_ep_file}")
         slice_start = start_sec if start_sec is not None else 0.0
         print(f"[*] Slicing 100% Studio Master Audio from {slice_start:.2f}s for {video_duration:.1f}s...")
 
