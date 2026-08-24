@@ -82,11 +82,13 @@ def find_local_episode_file(anime_name, episodes_dir="sakugabooru-episodes"):
         return None
 
     clean_search = anime_name.lower().replace('_', ' ').replace('-', ' ').strip()
+    words = [w for w in clean_search.split() if len(w) > 2 and w not in ('the', 'and', 'for', 'series')]
     for f in local_files:
-        if any(part in os.path.basename(f).lower() for part in clean_search.split()[:2]):
+        filename_lower = os.path.basename(f).lower()
+        if words and any(w in filename_lower for w in words):
             return f
 
-    return local_files[0]
+    return None
 
 def fetch_and_add_audio(video_path, anime_name):
     """
