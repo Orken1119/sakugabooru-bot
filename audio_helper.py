@@ -59,19 +59,23 @@ def fetch_and_add_audio(video_path, anime_name):
 
     print(f"[*] Audio Engine Processing Anime: '{anime_name}' (Clip Duration: {video_duration:.1f}s)")
 
+    start_sec, trace_filename, ep_num, match_info = fetch_scene_timestamp(video_path)
+    search_name = trace_filename or anime_name
+
     # Step 1: Check for local episode file in sakugabooru-episodes/
-    local_ep_file = find_local_episode_file(anime_name, episodes_dir=episodes_dir)
+    local_ep_file = find_local_episode_file(search_name, episodes_dir=episodes_dir)
     raw_output_path = video_path.replace(".mp4", "_raw_audio.mp4")
 
     if local_ep_file and os.path.exists(local_ep_file):
         print(f"[*] Local Episode File Matched: {local_ep_file}")
-        print(f"[*] Slicing 100% Studio Master Audio for {video_duration:.1f}s...")
+        slice_start = start_sec if start_sec is not None else 0.0
+        print(f"[*] Slicing 100% Studio Master Audio from {slice_start:.2f}s for {video_duration:.1f}s...")
 
         try:
             ffmpeg_cmd = [
                 "ffmpeg", "-y",
                 "-i", video_path,
-                "-ss", "0.0",
+                "-ss", str(slice_start),
                 "-i", local_ep_file,
                 "-c:v", "copy",
                 "-c:a", "aac",
@@ -87,9 +91,9 @@ def fetch_and_add_audio(video_path, anime_name):
         except Exception as e:
             print("[!] Local audio slicing error:", e)
 
-    # Step 2: If no local episode file, fetch Nyaa .torrent file
-    print(f"[!] No local episode file found in '{episodes_dir}/'. Automated Nyaa Search...")
-    torrent_file = search_and_download_nyaa(anime_name, output_dir=episodes_dir, auto_open=True)
+    # Step 2: If no local episode file, fetch exact episode Nyaa .torrent file
+    print(f"[!] No local episode file found in '{episodes_dir}/'. Automated Nyaa Search for Episode {ep_num}...")
+    torrent_file = search_and_download_nyaa(search_name, episode_num=ep_num, output_dir=episodes_dir, auto_open=True)
 
     if torrent_file:
         print(f"[!] ACTION REQUIRED: Torrent saved to '{torrent_file}'. Open in your torrent client, save episode to '{episodes_dir}/', and re-run main.py.")
