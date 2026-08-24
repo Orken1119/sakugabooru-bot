@@ -18,10 +18,10 @@ def get_media_duration(file_path):
     except Exception:
         return None
 
-def fetch_chunk_audio(video_path, t, chunk_len=2.0):
+def fetch_chunk_audio(video_path, t, target_anilist_id=None, target_episode=None, chunk_len=2.0):
     """
-    Samples frame at timestamp t, queries Trace.moe, calculates exact offset (at - from),
-    and extracts a frame-perfect slice of chunk_len seconds.
+    Samples frame at timestamp t, queries Trace.moe, enforces strict matching with target_anilist_id & target_episode,
+    calculates exact offset (at - from), and extracts a frame-perfect slice of chunk_len seconds.
     Returns (chunk_audio_path, match_info).
     """
     pid = os.getpid()
@@ -44,12 +44,24 @@ def fetch_chunk_audio(video_path, t, chunk_len=2.0):
         if res.status_code == 200:
             data = res.json()
             results = data.get('result', [])
-            if results and results[0].get('similarity', 0) >= 0.80:
-                match = results[0]
-                at_sec = match.get('at', 0)
-                from_sec = match.get('from', 0)
+            
+            selected_match = None
+            for m in results:
+                if m.get('similarity', 0) >= 0.75:
+                    if target_anilist_id is not None:
+                        # Strict Anime ID and Episode Filter: discard if different anime or episode
+                        if m.get('anilist') == target_anilist_id and m.get('episode') == target_episode:
+                            selected_match = m
+                            break
+                    else:
+                        selected_match = m
+                        break
+
+            if selected_match:
+                at_sec = selected_match.get('at', 0)
+                from_sec = selected_match.get('from', 0)
                 offset = max(0.0, at_sec - from_sec)
-                video_url = match.get('video')
+                video_url = selected_match.get('video')
 
                 if video_url:
                     v_res = requests.get(video_url, timeout=12)
@@ -64,7 +76,7 @@ def fetch_chunk_audio(video_path, t, chunk_len=2.0):
                         )
 
                         if os.path.exists(chunk_audio):
-                            return chunk_audio, match
+                            return chunk_audio, selected_match
 
     except Exception:
         pass
@@ -77,9 +89,9 @@ def fetch_chunk_audio(video_path, t, chunk_len=2.0):
 
 def fetch_multi_chunk_scene_audio(video_path):
     """
-    Automated 100% Full-Coverage Sampler:
-    Samples frames every 2.0 seconds AND injects the exact end frame (video_duration - 0.5s),
-    stitching all chunks for 100.0% complete frame-perfect audio coverage.
+    Automated Strict Anime Filter Sampler:
+    Enforces that ALL audio chunks belong to the exact same master Anime ID and Episode.
+    Discards any mismatched chunks from other anime shows to prevent random audio.
     Returns (stitched_audio_path, duration, match_info, parts_fetched, total_chunks).
     """
     video_duration = get_media_duration(video_path) or 5.0
@@ -92,27 +104,33 @@ def fetch_multi_chunk_scene_audio(video_path):
         timestamps.append(round(curr, 2))
         curr += sample_interval
 
-    # Always inject exact end boundary timestamp to guarantee 100.0% coverage to final frame
     end_stamp = round(max(0.5, video_duration - 0.5), 2)
     if not timestamps or (end_stamp - timestamps[-1]) >= 0.5:
         timestamps.append(end_stamp)
 
     total_chunks = len(timestamps)
-    print(f"[*] 100% Full-Coverage Sampler: Sampling {total_chunks} audio parts (including end boundary {end_stamp}s) across {video_duration:.1f}s video...")
+    print(f"[*] Strict AI Sampler: Sampling {total_chunks} audio parts across {video_duration:.1f}s video...")
 
     audio_chunks = []
     chunk_files = []
     first_match = None
+    target_anilist = None
+    target_ep = None
 
     for i, t in enumerate(timestamps):
-        chunk_audio, match = fetch_chunk_audio(video_path, t, chunk_len=sample_interval)
+        chunk_audio, match = fetch_chunk_audio(video_path, t, target_anilist_id=target_anilist, target_episode=target_ep, chunk_len=sample_interval)
         if chunk_audio and os.path.exists(chunk_audio):
             if not first_match:
                 first_match = match
-                print(f"[+] AI Scene Matched Episode {match.get('episode')} ({round(match.get('similarity',0)*100,1)}%)")
+                target_anilist = match.get('anilist')
+                target_ep = match.get('episode')
+                print(f"[+] Strict AI Match Established: AniList ID {target_anilist} Episode {target_ep} ({round(match.get('similarity',0)*100,1)}% confidence)")
 
             audio_chunks.append(chunk_audio)
             chunk_files.append(chunk_audio)
+        else:
+            if target_anilist is not None:
+                print(f"[!] Chunk {i} (t={t}s) discarded (did not match master Anime ID {target_anilist} Ep {target_ep})")
 
     parts_fetched = len(audio_chunks)
 
@@ -138,7 +156,7 @@ def fetch_multi_chunk_scene_audio(video_path):
 
         if os.path.exists(stitched_audio):
             total_duration = get_media_duration(stitched_audio) or 0
-            print(f"[+] Successfully stitched {parts_fetched}/{total_chunks} audio parts ({total_duration:.1f}s total audio)!")
+            print(f"[+] Successfully stitched {parts_fetched}/{total_chunks} verified anime audio parts ({total_duration:.1f}s total audio)!")
             return stitched_audio, total_duration, first_match, parts_fetched, total_chunks
 
     except Exception as e:
@@ -148,8 +166,9 @@ def fetch_multi_chunk_scene_audio(video_path):
 
 def fetch_and_add_audio(video_path, anime_name):
     """
-    Pure Raw Scene Audio Engine (No Audio Upscaling / No DSP):
-    - Fetches 100% full-coverage frame-synced scene audio.
+    Pure Raw Scene Audio Engine (Strict Single-Anime Filter):
+    - Fetches 100% verified single-anime scene audio (voices & sound effects).
+    - Discards any audio chunks belonging to other anime shows.
     - Merges raw original audio without DSP / upscaling.
     Returns raw_output_path.
     """
@@ -163,7 +182,7 @@ def fetch_and_add_audio(video_path, anime_name):
         return video_path
 
     coverage_percent = min(100.0, round((exact_duration / video_duration) * 100, 1))
-    print(f"[*] AUDIO STATS: Fetched {parts_fetched}/{total_chunks} parts | Coverage: {coverage_percent}% ({exact_duration:.1f}s / {video_duration:.1f}s)")
+    print(f"[*] AUDIO STATS: Fetched {parts_fetched}/{total_chunks} verified parts | Coverage: {coverage_percent}% ({exact_duration:.1f}s / {video_duration:.1f}s)")
 
     try:
         # RAW Audio Direct Merge (No audio upscaling, no DSP, no loudnorm filters)
