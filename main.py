@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from pybooru import Moebooru
 from dotenv import load_dotenv
 from audio_helper import fetch_and_add_audio
-from music_helper import add_lofi_to_video
+from music_helper import add_ost_to_video
 from config import connect_api
 
 load_dotenv()
@@ -110,10 +110,10 @@ def boorurandom(retries=0):
 
         raw_video = fetch_and_add_audio(video_path, animename, source_url=source_url)
 
-        # Add lofi music with fade in/out
-        final_video = add_lofi_to_video(raw_video)
+        # Add harmonically matched anime OST with fade in/out
+        final_video = add_ost_to_video(raw_video, animename)
         if not final_video:
-            final_video = raw_video  # fallback: use clip without music
+            final_video = raw_video  # fallback: clip without music
 
         # Format tweet text — proper sakuga credit format
         animator_credit = f"Key Animation: {animatorname}" if animatorname != "Unknown" else ""
