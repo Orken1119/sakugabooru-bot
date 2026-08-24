@@ -8,19 +8,24 @@ import bs4
 from bs4 import BeautifulSoup
 from pybooru import Moebooru
 from dotenv import load_dotenv
+from audio_helper import fetch_and_add_audio
 from config import connect_api
 
 load_dotenv()
 
 siteurl='https://www.sakugabooru.com/post/show/'
-header = {'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.94 Safari/537.36'}
+header = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,video/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5'
+}
 client = Moebooru(site_url='https://www.sakugabooru.com')
-files = client.post_list(tags="order:random")
+files = client.post_list(tags="order:random -western")
 
 def boorurandom():
         print("Hello!")
         try:
-            files = client.post_list(tags="order:random") #Random Post 
+            files = client.post_list(tags="order:random -western") #Random Post 
             choice = random.choice(files) #Select 1 Random Post from Query
             boorurl=choice['file_url'] #File URL
             tags = choice['tags'] #Post Tags
@@ -33,43 +38,53 @@ def boorurandom():
                 animename=animegrabber(posturl)
                 time.sleep(5)
                 
+                os.makedirs("sakugabooru-video-files", exist_ok=True)
                 data = requests.get(boorurl,headers=header)
                 print("data:",data.status_code)
-                with open("sakugabooru-video-files/{}".format(choice['id'])+".mp4",'wb') as file: 
+                video_path = "sakugabooru-video-files/{}".format(choice['id']) + ".mp4"
+                with open(video_path, 'wb') as file: 
                     file.write(data.content)
                 
-                params="Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\n".format(animatorname,animename,tags,posturl)
+                final_video = fetch_and_add_audio(video_path, animename)
+
+                params="Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\nFinal Video: {}\n".format(animatorname,animename,tags,posturl,final_video)
+                print("Extracted Metadata:\n" + params)
                 
-                time.sleep(5)
-                mediapost(params)
+                # time.sleep(5)
+                # mediapost(params)
 
         except Exception as e:
             print("Main() Error:",e)
 
 
 def artistgrabber(posturl):
-    r = requests.get(posturl,headers=header)
-    print("artistgrabber:",r.status_code)
-    soup = bs4.BeautifulSoup(r.text,'lxml')
-    for div in soup.find_all(class_="tag-type-artist"):
-        atags = div.find_all('a')
-    for artists in atags:
-        artiststr=artists.text
-    print(artiststr)
-
+    artiststr = "Unknown"
+    try:
+        r = requests.get(posturl, headers=header)
+        print("artistgrabber status:", r.status_code)
+        if r.status_code == 200:
+            soup = bs4.BeautifulSoup(r.text, 'html.parser')
+            artists_found = [a.text for div in soup.find_all(class_="tag-type-artist") for a in div.find_all('a') if a.text and a.text != '?']
+            if artists_found:
+                artiststr = ", ".join(artists_found)
+    except Exception as e:
+        print("artistgrabber error:", e)
+    print("Artist:", artiststr)
     return artiststr
 
 def animegrabber(posturl):
-    r = requests.get(posturl,headers=header)
-    print("animegrabber:",r.status_code)
-    soup = bs4.BeautifulSoup(r.text,'lxml')
-    
-    for div in soup.find_all(class_="tag-type-copyright"): 
-        atags = div.find_all('a')
-        for anime in atags:
-            animestr=anime.text
-    print(animestr)
-
+    animestr = "Unknown"
+    try:
+        r = requests.get(posturl, headers=header)
+        print("animegrabber status:", r.status_code)
+        if r.status_code == 200:
+            soup = bs4.BeautifulSoup(r.text, 'html.parser')
+            anime_found = [a.text for div in soup.find_all(class_="tag-type-copyright") for a in div.find_all('a') if a.text and a.text != '?']
+            if anime_found:
+                animestr = ", ".join(anime_found)
+    except Exception as e:
+        print("animegrabber error:", e)
+    print("Anime:", animestr)
     return animestr
 
 def filetypechecker(boorurl):
@@ -79,29 +94,29 @@ def filetypechecker(boorurl):
             else:
                 return False
 
-def mediapost(params):
-    try:
-        api=connect_api()
-        file_path=[]
-        directory_name='sakugabooru-video-files' #Customize Directory
-        media_list=filter(lambda x: os.path.isfile(os.path.join(directory_name,x)),os.listdir(directory_name))
-        media_list=sorted(media_list,key=lambda x: os.path.getmtime(os.path.join(directory_name,x)),reverse=True)
-
-        for media in media_list:
-            file_path.append(os.path.join(directory_name,media))       
-        media=file_path[0]
-
-        print(media)
-        upload_media=api.media_upload(media, media_category='tweet_video')
-        api.update_status(status=params, media_ids=[upload_media.media_id_string])
-
-    except Exception as e:
-        print("Mediapost() Error:",e)
+# def mediapost(params):
+#     try:
+#         api=connect_api()
+#         file_path=[]
+#         directory_name='sakugabooru-video-files' #Customize Directory
+#         media_list=filter(lambda x: os.path.isfile(os.path.join(directory_name,x)),os.listdir(directory_name))
+#         media_list=sorted(media_list,key=lambda x: os.path.getmtime(os.path.join(directory_name,x)),reverse=True)
+# 
+#         for media in media_list:
+#             file_path.append(os.path.join(directory_name,media))       
+#         media=file_path[0]
+# 
+#         print(media)
+#         upload_media=api.media_upload(media, media_category='tweet_video')
+#         api.update_status(status=params, media_ids=[upload_media.media_id_string])
+# 
+#     except Exception as e:
+#         print("Mediapost() Error:",e)
         
 if __name__ == '__main__':
     boorurandom()
-    schedule.every(45).minutes.do(boorurandom)
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    # schedule.every(45).minutes.do(boorurandom)
+    # 
+    # while True:
+    #     schedule.run_pending()
+    #     time.sleep(1)
