@@ -81,7 +81,7 @@ def fetch_multi_chunk_scene_audio(video_path):
     """
     Samples frames across the video duration (every 5 seconds) and queries Trace.moe
     for each timestamp chunk, then stitches (concatenates) all audio snippets together
-    to form 100% original dialogue & sound effects for the full scene!
+    to form 100% original dialogue & sound effects for the full scene.
     """
     video_duration = get_media_duration(video_path) or 5.0
     pid = os.getpid()
@@ -216,42 +216,11 @@ def try_yt_dlp_section_download(anime_name, episode, start_sec, duration_sec, pi
 
     return None, 0
 
-def fetch_ost_audio(anime_name, pid):
-    """
-    Downloads anime OST background music using yt-dlp.
-    """
-    temp_ost = f"temp_ost_{pid}.mp3"
-    if not anime_name or anime_name.lower() == "unknown":
-        query = "Anime OST soundtrack"
-    else:
-        clean_anime = anime_name.split(',')[0].strip()
-        query = f"{clean_anime} OST"
-
-    print(f"[*] Fetching anime OST soundtrack for: '{query}'...")
-    try:
-        ytdlp_cmd = [
-            ".venv/bin/yt-dlp",
-            f"ytsearch1:{query}",
-            "-x",
-            "--audio-format", "mp3",
-            "-o", temp_ost,
-            "--no-playlist",
-            "--quiet"
-        ]
-        res = subprocess.run(ytdlp_cmd)
-        if res.returncode == 0 and os.path.exists(temp_ost):
-            return temp_ost
-    except Exception as e:
-        print("[!] OST download error:", e)
-
-    return None
-
 def fetch_and_add_audio(video_path, anime_name):
     """
-    Smart Multi-Chunk Audio Pipeline:
-    1. Samples frames across video to fetch & stitch multi-chunk exact scene audio (Dialogue + SFX).
-    2. Try yt-dlp section download if available.
-    3. Fall back to smooth cross-fade to anime OST soundtrack.
+    Strict Pure Scene Audio Engine (Zero Background OST Music):
+    - Fetches 100% original scene audio (voices & sound effects).
+    - Reports exact audio coverage percentage.
     """
     pid = os.getpid()
     video_duration = get_media_duration(video_path) or 10.0
@@ -259,7 +228,6 @@ def fetch_and_add_audio(video_path, anime_name):
     output_path = video_path.replace(".mp4", "_audio.mp4")
 
     section_audio_file = None
-    ost_file = None
 
     if match_info and exact_duration < (video_duration - 0.5):
         ep = match_info.get('episode')
@@ -271,9 +239,15 @@ def fetch_and_add_audio(video_path, anime_name):
     audio_to_use = section_audio_file or exact_audio_file
     audio_dur = sec_dur if section_audio_file else exact_duration
 
-    # Case 1: Full Section/Stitched Audio covers whole video duration
-    if audio_to_use and audio_dur >= (video_duration - 0.5):
-        print(f"[+] Full stitched scene audio covers whole video ({audio_dur:.1f}s / {video_duration:.1f}s)")
+    if not audio_to_use or not os.path.exists(audio_to_use) or audio_dur == 0:
+        print("[!] No original scene audio could be matched for this clip.")
+        return video_path
+
+    coverage_percent = min(100.0, round((audio_dur / video_duration) * 100, 1))
+    print(f"[*] AUDIO COVERAGE REPORT: {coverage_percent}% original scene audio ({audio_dur:.1f}s audio / {video_duration:.1f}s video)")
+
+    try:
+        # Pure Scene Audio Merge (No music background)
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
@@ -282,80 +256,21 @@ def fetch_and_add_audio(video_path, anime_name):
             "-c:a", "aac",
             "-b:a", "320k",
             "-ar", "48000",
-            "-af", "loudnorm=I=-14:LRA=11:TP=-1.5,afade=t=in:ss=0:d=0.3",
+            "-af", "loudnorm=I=-14:LRA=11:TP=-1.5",
             "-t", str(video_duration),
             output_path
         ]
-        subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        res_ff = subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Case 2: Stitched audio is shorter than video duration -> Smooth cross-fade to OST (NO REPETITION)
-    elif exact_audio_file and exact_duration > 0:
-        ost_file = fetch_ost_audio(anime_name, pid)
-        if ost_file:
-            print(f"[+] Cross-fading stitched audio ({exact_duration:.1f}s) smoothly into OST soundtrack...")
-            fade_start = max(1.0, exact_duration - 2.0)
-            filter_complex = (
-                f"[1:a]afade=t=out:st={fade_start:.1f}:d=2.0[a1];"
-                f"[2:a]afade=t=in:ss={fade_start:.1f}:d=2.0[a2];"
-                f"[a1][a2]amix=inputs=2:duration=longest,loudnorm=I=-14:LRA=11:TP=-1.5[aout]"
-            )
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-i", exact_audio_file,
-                "-i", ost_file,
-                "-filter_complex", filter_complex,
-                "-map", "0:v",
-                "-map", "[aout]",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-b:a", "320k",
-                "-ar", "48000",
-                "-t", str(video_duration),
-                output_path
-            ]
-            subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-i", exact_audio_file,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-b:a", "320k",
-                "-ar", "48000",
-                "-af", f"afade=t=out:st={max(0.5, exact_duration - 1.0)}:d=1.0,loudnorm=I=-14:LRA=11:TP=-1.5",
-                "-t", str(video_duration),
-                output_path
-            ]
-            subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res_ff.returncode == 0 and os.path.exists(output_path):
+            print(f"[+] Final Video with Pure Scene Audio saved: {output_path}")
+            return output_path
 
-    # Case 3: Only OST available
-    else:
-        ost_file = fetch_ost_audio(anime_name, pid)
-        if ost_file:
-            print("[+] Using Studio Mastered OST Soundtrack...")
-            ffmpeg_cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-i", ost_file,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-b:a", "320k",
-                "-ar", "48000",
-                "-af", "loudnorm=I=-14:LRA=11:TP=-1.5,afade=t=in:ss=0:d=0.3",
-                "-t", str(video_duration),
-                output_path
-            ]
-            subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    # Cleanup temp files
-    for f in [exact_audio_file, section_audio_file, ost_file]:
-        if f and os.path.exists(f):
-            os.remove(f)
-
-    if os.path.exists(output_path):
-        print(f"[+] Final Video with Seamless Stitched Audio saved: {output_path}")
-        return output_path
+    except Exception as e:
+        print("[!] Audio processing error:", e)
+    finally:
+        for f in [exact_audio_file, section_audio_file]:
+            if f and os.path.exists(f):
+                os.remove(f)
 
     return video_path
