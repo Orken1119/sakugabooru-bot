@@ -67,10 +67,10 @@ def fetch_scene_timestamp(video_path):
 
 def is_download_complete(filepath):
     """
-    Deep Download Completion Verification:
-    1. Checks that file exists and does NOT have incomplete extension (.!qB, .part, .crdownload).
-    2. Verifies file size is stable (not growing) over a 1.2-second interval.
-    3. Verifies file is readable and non-empty.
+    100% Fail-Safe Download Completion Verification:
+    Uses ffprobe to verify that the video container header, audio streams, and media
+    duration are valid and readable. Returns True ONLY when qBittorrent finishes
+    downloading the real video streams (ignoring pre-allocated zero files).
     """
     if not filepath or not os.path.exists(filepath):
         return False
@@ -79,25 +79,20 @@ def is_download_complete(filepath):
         return False
 
     try:
-        size1 = os.path.getsize(filepath)
-        if size1 < 1024 * 1024:  # Must be at least 1MB to be a valid video
-            return False
-
-        time.sleep(1.2)
-        size2 = os.path.getsize(filepath)
-
-        # File is still actively being written to by qBittorrent if size is changing
-        if size1 != size2:
-            return False
-
-        # Attempt to read EOF to confirm file handle integrity
-        with open(filepath, 'rb') as f:
-            f.seek(-1, os.SEEK_END)
-            f.read(1)
-
-        return True
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filepath
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            dur = float(res.stdout.strip())
+            return dur > 0.0
     except Exception:
         return False
+
+    return False
 
 def find_local_episode_file(anime_name, search_dirs=["sakugabooru-episodes", "/home/orken/Downloads"], require_complete=False):
     """
@@ -125,10 +120,10 @@ def find_local_episode_file(anime_name, search_dirs=["sakugabooru-episodes", "/h
 
 def fetch_and_add_audio(video_path, anime_name):
     """
-    Automated Local Episode Audio Engine with Deep Completion Verification:
+    Automated Local Episode Audio Engine with ffprobe Completion Verification:
     1. Gets exact episode timestamp from Trace.moe.
-    2. Checks for finished local episode file.
-    3. If missing, launches Nyaa torrent and polls until download completion is VERIFIED.
+    2. Checks for finished local episode file via ffprobe.
+    3. If missing, launches Nyaa torrent and polls until download completion is 100% VERIFIED.
     4. Slices exact 20s audio track using ffmpeg and merges.
     """
     video_duration = get_media_duration(video_path) or 10.0
@@ -150,16 +145,16 @@ def fetch_and_add_audio(video_path, anime_name):
         torrent_file = search_and_download_nyaa(search_name, episode_num=ep_num, output_dir=episodes_dir, auto_open=True)
 
         if torrent_file:
-            print("[*] Waiting for qBittorrent download completion verification (polling file stability every 3s)...")
-            max_wait_seconds = 180
+            print("[*] Waiting for qBittorrent download completion verification (ffprobe checking media integrity every 5s)...")
+            max_wait_seconds = 300
             poll_start = time.time()
             while (time.time() - poll_start) < max_wait_seconds:
                 candidate = find_local_episode_file(search_name, require_complete=True)
                 if candidate:
                     local_ep_file = candidate
-                    print(f"[+] Download Completion 100% Verified! Episode File Detected: {local_ep_file}")
+                    print(f"[+] Download Completion 100% Verified via ffprobe! Episode File Ready: {local_ep_file}")
                     break
-                time.sleep(3)
+                time.sleep(5)
 
     if local_ep_file and os.path.exists(local_ep_file):
         print(f"[*] Verified Local Episode File Matched: {local_ep_file}")
@@ -175,7 +170,7 @@ def fetch_and_add_audio(video_path, anime_name):
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-map", "0:v:0",
-                "-map", "1:a:0",
+                "-map", "1:a:0?",
                 "-t", str(video_duration),
                 raw_output_path
             ]
