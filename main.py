@@ -118,6 +118,18 @@ def boorurandom(retries=0):
             # Auto-delete raw video after OST is merged
             os.remove(raw_video)
 
+        # Rename final_video numerically starting from 1 (1.mp4, 2.mp4, 3.mp4...)
+        existing_numbers = []
+        for f in os.listdir("sakugabooru-video-files"):
+            name, ext = os.path.splitext(f)
+            if ext == ".mp4" and name.isdigit():
+                existing_numbers.append(int(name))
+        next_num = max(existing_numbers, default=0) + 1
+        num_path = os.path.join("sakugabooru-video-files", f"{next_num}.mp4")
+        if os.path.exists(final_video):
+            os.rename(final_video, num_path)
+            final_video = num_path
+
         # Format tweet text — proper sakuga credit format
         animator_credit = f"Key Animation: {animatorname}" if animatorname != "Unknown" else ""
         tweet_text = (
