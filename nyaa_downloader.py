@@ -1,14 +1,15 @@
 import os
+import re
 import subprocess
 import requests
 import xml.etree.ElementTree as ET
 
 def search_and_download_nyaa(anime_title, episode_num=None, output_dir="sakugabooru-episodes", auto_open=True):
     """
-    Bulletproof Nyaa.si Torrent Search & Auto-Launcher:
-    1. Generates single-episode queries and excludes season batches if episode_num is specified.
-    2. Downloads the top single-episode .torrent file into output_dir.
-    3. Auto-launches torrent client via xdg-open.
+    Strict Single-Episode Nyaa.si Torrent Search & Auto-Launcher:
+    1. Generates single-episode queries.
+    2. Strictly filters out all batch/season/box packs (e.g. '386-412', 'batch', 'tv box', 'complete').
+    3. Downloads ONLY single-episode .torrent files into output_dir.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -20,7 +21,7 @@ def search_and_download_nyaa(anime_title, episode_num=None, output_dir="sakugabo
     clean_title = candidate_titles[0]
     ep_str = f"{episode_num:02d}" if isinstance(episode_num, int) else (str(episode_num) if episode_num else "")
 
-    # Build fallback query list
+    # Build query list
     queries = []
     if ep_str:
         queries.append(f"{clean_title} E{ep_str} 1080p")
@@ -28,10 +29,12 @@ def search_and_download_nyaa(anime_title, episode_num=None, output_dir="sakugabo
         queries.append(f"{clean_title} {ep_str}")
         queries.append(f"{clean_title}")
     else:
+        queries.append(f"{clean_title} 01 1080p")
         queries.append(f"{clean_title} 1080p")
         queries.append(f"{clean_title}")
 
     domains = ['https://nyaa.si', 'https://nyaa.land']
+    batch_pattern = re.compile(r'batch|box|complete|season|vol\b|collection|pack|disc|\d{1,4}\s*-\s*\d{1,4}|\d{1,4}\s*~\s*\d{1,4}', re.IGNORECASE)
 
     for query in queries:
         for domain in domains:
@@ -45,16 +48,20 @@ def search_and_download_nyaa(anime_title, episode_num=None, output_dir="sakugabo
                     if items:
                         selected_item = None
 
-                        # If episode_num is specified, avoid season batches (Batch, Complete, S01-S12)
-                        if ep_str:
-                            for item in items:
-                                title_text = item.find('title').text.lower()
-                                if not any(b in title_text for b in ['batch', 'complete series', 'season 1', 'season 2', '01-']):
-                                    selected_item = item
-                                    break
+                        for item in items:
+                            title_text = item.find('title').text
+                            if not batch_pattern.search(title_text):
+                                selected_item = item
+                                break
 
                         if not selected_item:
-                            selected_item = items[0]
+                            # Strict fallback: filter out anything containing batch_pattern
+                            single_candidates = [i for i in items if not batch_pattern.search(i.find('title').text)]
+                            if single_candidates:
+                                selected_item = single_candidates[0]
+                            else:
+                                print(f"[!] No single-episode candidate passed strict pattern check for query '{query}'. Trying fallback...")
+                                continue
 
                         torrent_title = selected_item.find('title').text
                         torrent_link = selected_item.find('link').text
@@ -66,7 +73,7 @@ def search_and_download_nyaa(anime_title, episode_num=None, output_dir="sakugabo
                             with open(torrent_filepath, 'wb') as f:
                                 f.write(torrent_res.content)
 
-                            print(f"[+] Single Episode Nyaa Torrent Found & Saved: {torrent_filepath}")
+                            print(f"[+] Strict Single Episode Torrent Saved: {torrent_filepath}")
 
                             if auto_open:
                                 try:
@@ -84,5 +91,5 @@ def search_and_download_nyaa(anime_title, episode_num=None, output_dir="sakugabo
 
 if __name__ == "__main__":
     import sys
-    search_query = sys.argv[1] if len(sys.argv) > 1 else "Demon Slayer 06"
-    search_and_download_nyaa(search_query, episode_num=6)
+    search_query = sys.argv[1] if len(sys.argv) > 1 else "Naruto Shippuuden"
+    search_and_download_nyaa(search_query)
