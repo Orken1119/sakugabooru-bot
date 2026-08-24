@@ -30,7 +30,6 @@ def fetch_exact_scene_audio(video_path):
     audio_path = f"temp_exact_audio_{pid}.aac"
 
     try:
-        # Step 1: Extract 1 frame from the Sakugabooru clip
         subprocess.run(
             ['ffmpeg', '-y', '-ss', '00:00:01', '-i', video_path, '-vframes', '1', frame_path],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
@@ -51,9 +50,8 @@ def fetch_exact_scene_audio(video_path):
                 episode = match.get('episode')
                 similarity = round(match.get('similarity', 0) * 100, 2)
                 video_url = match.get('video')
-                start_sec = match.get('from', 0)
 
-                print(f"[+] Exact Scene Matched! Episode {episode} ({similarity}% confidence, start: {start_sec:.1f}s)")
+                print(f"[+] Exact Scene Matched! Episode {episode} ({similarity}% confidence)")
 
                 if video_url:
                     v_res = requests.get(video_url, timeout=15)
@@ -76,6 +74,107 @@ def fetch_exact_scene_audio(video_path):
         for f in [frame_path, preview_video_path]:
             if os.path.exists(f):
                 os.remove(f)
+
+    return None, 0, None
+
+def fetch_multi_chunk_scene_audio(video_path):
+    """
+    Samples frames across the video duration (every 5 seconds) and queries Trace.moe
+    for each timestamp chunk, then stitches (concatenates) all audio snippets together
+    to form 100% original dialogue & sound effects for the full scene!
+    """
+    video_duration = get_media_duration(video_path) or 5.0
+    pid = os.getpid()
+
+    sample_interval = 5.0
+    timestamps = []
+    curr = 1.0
+    while curr < video_duration:
+        timestamps.append(curr)
+        curr += sample_interval
+
+    if len(timestamps) <= 1:
+        return fetch_exact_scene_audio(video_path)
+
+    print(f"[*] Multi-Chunk Sampling: Extracting {len(timestamps)} audio chunks across {video_duration:.1f}s video...")
+
+    audio_chunks = []
+    chunk_files = []
+    first_match = None
+
+    for i, t in enumerate(timestamps):
+        frame_path = f"temp_frame_{pid}_{i}.jpg"
+        preview_path = f"temp_prev_{pid}_{i}.mp4"
+        chunk_audio = f"temp_chunk_{pid}_{i}.aac"
+
+        try:
+            subprocess.run(
+                ['ffmpeg', '-y', '-ss', str(t), '-i', video_path, '-vframes', '1', frame_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+
+            if os.path.exists(frame_path):
+                with open(frame_path, 'rb') as f:
+                    res = requests.post('https://api.trace.moe/search', files={'image': f}, timeout=10)
+
+                if res.status_code == 200:
+                    results = res.json().get('result', [])
+                    if results and results[0].get('similarity', 0) >= 0.80:
+                        match = results[0]
+                        if not first_match:
+                            first_match = match
+                            print(f"[+] Multi-Chunk Matched Episode {match.get('episode')} ({round(match.get('similarity',0)*100,1)}%)")
+
+                        video_url = match.get('video')
+                        if video_url:
+                            v_res = requests.get(video_url, timeout=12)
+                            if v_res.status_code == 200:
+                                with open(preview_path, 'wb') as f:
+                                    f.write(v_res.content)
+
+                                subprocess.run(
+                                    ['ffmpeg', '-y', '-i', preview_path, '-vn', '-c:a', 'aac', chunk_audio],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                                )
+
+                                if os.path.exists(chunk_audio):
+                                    audio_chunks.append(chunk_audio)
+                                    chunk_files.append(chunk_audio)
+
+        except Exception as e:
+            print(f"[!] Chunk {i} fetch failed:", e)
+        finally:
+            for f in [frame_path, preview_path]:
+                if os.path.exists(f):
+                    os.remove(f)
+
+    if not audio_chunks:
+        return None, 0, None
+
+    stitched_audio = f"temp_stitched_{pid}.aac"
+    concat_list = f"temp_list_{pid}.txt"
+
+    try:
+        with open(concat_list, 'w') as f:
+            for chunk in audio_chunks:
+                f.write(f"file '{os.path.abspath(chunk)}'\n")
+
+        subprocess.run(
+            ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list, '-c', 'copy', stitched_audio],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+        )
+
+        for f in chunk_files + [concat_list]:
+            if os.path.exists(f):
+                os.remove(f)
+
+        if os.path.exists(stitched_audio):
+            total_duration = get_media_duration(stitched_audio) or 0
+            print(f"[+] Successfully stitched {len(audio_chunks)} audio chunks ({total_duration:.1f}s total audio)!")
+            return stitched_audio, total_duration, first_match
+
+    except Exception as e:
+        print("[!] Multi-chunk audio stitching error:", e)
 
     return None, 0, None
 
@@ -149,20 +248,19 @@ def fetch_ost_audio(anime_name, pid):
 
 def fetch_and_add_audio(video_path, anime_name):
     """
-    Smart 3-Tier Audio Pipeline:
-    1. Try Trace.moe AI scene identification.
-    2. Try yt-dlp exact timeframe section download.
-    3. Fall back to Trace.moe dialogue + OST smooth cross-fade.
+    Smart Multi-Chunk Audio Pipeline:
+    1. Samples frames across video to fetch & stitch multi-chunk exact scene audio (Dialogue + SFX).
+    2. Try yt-dlp section download if available.
+    3. Fall back to smooth cross-fade to anime OST soundtrack.
     """
     pid = os.getpid()
     video_duration = get_media_duration(video_path) or 10.0
-    exact_audio_file, exact_duration, match_info = fetch_exact_scene_audio(video_path)
+    exact_audio_file, exact_duration, match_info = fetch_multi_chunk_scene_audio(video_path)
     output_path = video_path.replace(".mp4", "_audio.mp4")
 
     section_audio_file = None
     ost_file = None
 
-    # Try Tier 2: yt-dlp section download if Trace.moe provided match info & snippet is shorter
     if match_info and exact_duration < (video_duration - 0.5):
         ep = match_info.get('episode')
         start_sec = match_info.get('from', 0)
@@ -170,12 +268,12 @@ def fetch_and_add_audio(video_path, anime_name):
         if sec_file and sec_dur >= (video_duration - 0.5):
             section_audio_file = sec_file
 
-    # Case 1: Full Section Audio available (covers whole video)
     audio_to_use = section_audio_file or exact_audio_file
     audio_dur = sec_dur if section_audio_file else exact_duration
 
+    # Case 1: Full Section/Stitched Audio covers whole video duration
     if audio_to_use and audio_dur >= (video_duration - 0.5):
-        print(f"[+] Full exact audio covers video duration ({audio_dur:.1f}s / {video_duration:.1f}s)")
+        print(f"[+] Full stitched scene audio covers whole video ({audio_dur:.1f}s / {video_duration:.1f}s)")
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
@@ -190,11 +288,11 @@ def fetch_and_add_audio(video_path, anime_name):
         ]
         subprocess.run(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Case 2: Exact audio is shorter than video -> Smooth cross-fade to OST (NO REPETITION)
+    # Case 2: Stitched audio is shorter than video duration -> Smooth cross-fade to OST (NO REPETITION)
     elif exact_audio_file and exact_duration > 0:
         ost_file = fetch_ost_audio(anime_name, pid)
         if ost_file:
-            print(f"[+] Cross-fading scene audio ({exact_duration:.1f}s) smoothly into OST soundtrack...")
+            print(f"[+] Cross-fading stitched audio ({exact_duration:.1f}s) smoothly into OST soundtrack...")
             fade_start = max(1.0, exact_duration - 2.0)
             filter_complex = (
                 f"[1:a]afade=t=out:st={fade_start:.1f}:d=2.0[a1];"
@@ -257,7 +355,7 @@ def fetch_and_add_audio(video_path, anime_name):
             os.remove(f)
 
     if os.path.exists(output_path):
-        print(f"[+] Final Video with Seamless Audio saved: {output_path}")
+        print(f"[+] Final Video with Seamless Stitched Audio saved: {output_path}")
         return output_path
 
     return video_path

@@ -26,29 +26,32 @@ def boorurandom():
         print("Hello!")
         try:
             files = client.post_list(tags="order:random -western") #Random Post 
-            choice = random.choice(files) #Select 1 Random Post from Query
+            mp4_files = [f for f in files if filetypechecker(f.get('file_url', ''))]
+            if not mp4_files:
+                print("No mp4 files found in this batch, retrying...")
+                return boorurandom()
+
+            choice = random.choice(mp4_files) #Select 1 Random MP4 Post
             boorurl=choice['file_url'] #File URL
             tags = choice['tags'] #Post Tags
 
-            verdict=filetypechecker(boorurl) #Checker if .mp4 file or not
-            if(verdict):
-                posturl = siteurl+"{0}".format(choice['id']) #POST URL from SakugaBooru
+            posturl = siteurl+"{0}".format(choice['id']) #POST URL from SakugaBooru
 
-                animatorname=artistgrabber(posturl)
-                animename=animegrabber(posturl)
-                time.sleep(5)
-                
-                os.makedirs("sakugabooru-video-files", exist_ok=True)
-                data = requests.get(boorurl,headers=header)
-                print("data:",data.status_code)
-                video_path = "sakugabooru-video-files/{}".format(choice['id']) + ".mp4"
-                with open(video_path, 'wb') as file: 
-                    file.write(data.content)
-                
-                final_video = fetch_and_add_audio(video_path, animename)
+            animatorname=artistgrabber(posturl)
+            animename=animegrabber(posturl)
+            time.sleep(5)
+            
+            os.makedirs("sakugabooru-video-files", exist_ok=True)
+            data = requests.get(boorurl,headers=header)
+            print("data:",data.status_code)
+            video_path = "sakugabooru-video-files/{}".format(choice['id']) + ".mp4"
+            with open(video_path, 'wb') as file: 
+                file.write(data.content)
+            
+            final_video = fetch_and_add_audio(video_path, animename)
 
-                params="Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\nFinal Video: {}\n".format(animatorname,animename,tags,posturl,final_video)
-                print("Extracted Metadata:\n" + params)
+            params="Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\nFinal Video: {}\n".format(animatorname,animename,tags,posturl,final_video)
+            print("Extracted Metadata:\n" + params)
                 
                 # time.sleep(5)
                 # mediapost(params)
