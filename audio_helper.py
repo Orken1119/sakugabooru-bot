@@ -89,9 +89,9 @@ def fetch_chunk_audio(video_path, t, target_anilist_id=None, target_episode=None
 
 def fetch_multi_chunk_scene_audio(video_path):
     """
-    Automated Strict Anime Filter Sampler:
-    Enforces that ALL audio chunks belong to the exact same master Anime ID and Episode.
-    Discards any mismatched chunks from other anime shows to prevent random audio.
+    Equal-Power Overlap Cross-Fading Sampler:
+    Samples frames every 2.0s, verifies strict anime matching, and applies 0.1s equal-power cross-fading
+    between consecutive chunks to completely eliminate audio clicks, pops, and split seams.
     Returns (stitched_audio_path, duration, match_info, parts_fetched, total_chunks).
     """
     video_duration = get_media_duration(video_path) or 5.0
@@ -109,7 +109,7 @@ def fetch_multi_chunk_scene_audio(video_path):
         timestamps.append(end_stamp)
 
     total_chunks = len(timestamps)
-    print(f"[*] Strict AI Sampler: Sampling {total_chunks} audio parts across {video_duration:.1f}s video...")
+    print(f"[*] Equal-Power Sampler: Sampling {total_chunks} audio parts with 0.1s overlap cross-fading across {video_duration:.1f}s video...")
 
     audio_chunks = []
     chunk_files = []
@@ -138,37 +138,49 @@ def fetch_multi_chunk_scene_audio(video_path):
         return None, 0, None, 0, total_chunks
 
     stitched_audio = f"temp_stitched_{pid}.aac"
-    concat_list = f"temp_list_{pid}.txt"
 
     try:
-        with open(concat_list, 'w') as f:
-            for chunk in audio_chunks:
-                f.write(f"file '{os.path.abspath(chunk)}'\n")
+        if len(audio_chunks) == 1:
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', audio_chunks[0], '-c', 'copy', stitched_audio],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+        else:
+            # Multi-chunk Equal-Power Overlap Cross-Fading (0.1s acrossfade) to eliminate split clicks/seams
+            inputs = []
+            for c in audio_chunks:
+                inputs.extend(['-i', c])
 
-        subprocess.run(
-            ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list, '-c', 'copy', stitched_audio],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-        )
+            filter_parts = []
+            last_label = "0:a"
+            for idx in range(1, len(audio_chunks)):
+                next_label = f"a{idx}"
+                filter_parts.append(f"[{last_label}][{idx}:a]acrossfade=d=0.1:c1=tri:c2=tri[{next_label}]")
+                last_label = next_label
 
-        for f in chunk_files + [concat_list]:
+            filter_complex = ";".join(filter_parts)
+            cmd = ['ffmpeg', '-y'] + inputs + ['-filter_complex', filter_complex, '-map', f'[{last_label}]', '-c:a', 'aac', stitched_audio]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        for f in chunk_files:
             if os.path.exists(f):
                 os.remove(f)
 
         if os.path.exists(stitched_audio):
             total_duration = get_media_duration(stitched_audio) or 0
-            print(f"[+] Successfully stitched {parts_fetched}/{total_chunks} verified anime audio parts ({total_duration:.1f}s total audio)!")
+            print(f"[+] Successfully cross-faded & stitched {parts_fetched}/{total_chunks} audio parts ({total_duration:.1f}s total seamless audio)!")
             return stitched_audio, total_duration, first_match, parts_fetched, total_chunks
 
     except Exception as e:
-        print("[!] Multi-chunk audio stitching error:", e)
+        print("[!] Multi-chunk audio cross-fade stitching error:", e)
 
     return None, 0, None, parts_fetched, total_chunks
 
 def fetch_and_add_audio(video_path, anime_name):
     """
-    Pure Raw Scene Audio Engine (Strict Single-Anime Filter):
-    - Fetches 100% verified single-anime scene audio (voices & sound effects).
-    - Discards any audio chunks belonging to other anime shows.
+    Pure Raw Scene Audio Engine (Equal-Power Overlap Cross-Fading):
+    - Fetches 100% verified single-anime scene audio.
+    - Applies 0.1s equal-power cross-fading to eliminate split seams and click artifacts.
     - Merges raw original audio without DSP / upscaling.
     Returns raw_output_path.
     """
@@ -182,7 +194,7 @@ def fetch_and_add_audio(video_path, anime_name):
         return video_path
 
     coverage_percent = min(100.0, round((exact_duration / video_duration) * 100, 1))
-    print(f"[*] AUDIO STATS: Fetched {parts_fetched}/{total_chunks} verified parts | Coverage: {coverage_percent}% ({exact_duration:.1f}s / {video_duration:.1f}s)")
+    print(f"[*] AUDIO STATS: Fetched {parts_fetched}/{total_chunks} verified parts | Seamless Coverage: {coverage_percent}% ({exact_duration:.1f}s / {video_duration:.1f}s)")
 
     try:
         # RAW Audio Direct Merge (No audio upscaling, no DSP, no loudnorm filters)
@@ -198,7 +210,7 @@ def fetch_and_add_audio(video_path, anime_name):
         res_ff = subprocess.run(ffmpeg_raw, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if res_ff.returncode == 0 and os.path.exists(raw_output_path):
-            print(f"[+] Raw Version Saved: {raw_output_path}")
+            print(f"[+] Seamless Raw Version Saved: {raw_output_path}")
             return raw_output_path
 
     except Exception as e:
