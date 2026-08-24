@@ -11,7 +11,13 @@ def search_and_download_nyaa(anime_title, episode_num=None, output_dir="sakugabo
     3. Auto-launches torrent client via xdg-open if auto_open is True.
     """
     os.makedirs(output_dir, exist_ok=True)
-    clean_title = anime_title.replace('_', ' ').replace('-', ' ').strip()
+    
+    parts = [p.strip() for p in anime_title.replace('_', ' ').replace('-', ' ').split(',') if p.strip()]
+    candidate_titles = [p for p in reversed(parts) if "series" not in p.lower()]
+    if not candidate_titles:
+        candidate_titles = parts if parts else [anime_title]
+
+    clean_title = candidate_titles[0]
     
     if episode_num:
         query = f"{clean_title} {episode_num:02d} 1080p" if isinstance(episode_num, int) else f"{clean_title} {episode_num} 1080p"
