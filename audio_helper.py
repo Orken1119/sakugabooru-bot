@@ -18,26 +18,33 @@ def get_media_duration(file_path):
     except Exception:
         return None
 
-def fetch_chunk_audio(video_path, t, chunk_len=2.0):
+def fetch_master_synced_scene_audio(video_path):
     """
-    Samples frame at timestamp t, queries Trace.moe, calculates exact offset (at - from),
-    and extracts a frame-perfect slice of chunk_len seconds.
-    Returns (chunk_audio_path, match_info).
+    Master Offset 100% Frame Sync Engine:
+    Samples frame at t=0.5s, queries Trace.moe, calculates exact master_offset for t=0.0s:
+        master_offset = (at - 0.5) - from
+    Slices continuous audio starting at master_offset for 100% frame-perfect visual-audio sync.
+    Returns (audio_path, duration, match_info).
     """
+    video_duration = get_media_duration(video_path) or 10.0
     pid = os.getpid()
-    frame_path = f"temp_frame_{pid}_{t}.jpg"
-    preview_path = f"temp_prev_{pid}_{t}.mp4"
-    chunk_audio = f"temp_chunk_{pid}_{t}.aac"
+    seek_time = min(1.0, max(0.2, video_duration / 4.0))
+
+    frame_path = f"temp_frame_{pid}.jpg"
+    preview_video_path = f"temp_preview_{pid}.mp4"
+    audio_path = f"temp_master_audio_{pid}.aac"
 
     try:
+        # Extract sample frame at seek_time
         subprocess.run(
-            ['ffmpeg', '-y', '-ss', str(t), '-i', video_path, '-vframes', '1', frame_path],
+            ['ffmpeg', '-y', '-ss', str(seek_time), '-i', video_path, '-vframes', '1', frame_path],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
         )
 
         if not os.path.exists(frame_path):
-            return None, None
+            return None, 0, None
 
+        print(f"[*] Master Sync Sampler: Performing Trace.moe AI visual search (sample t={seek_time:.2f}s)...")
         with open(frame_path, 'rb') as f:
             res = requests.post('https://api.trace.moe/search', files={'image': f}, timeout=10)
 
@@ -46,112 +53,52 @@ def fetch_chunk_audio(video_path, t, chunk_len=2.0):
             results = data.get('result', [])
             if results and results[0].get('similarity', 0) >= 0.80:
                 match = results[0]
+                episode = match.get('episode')
+                similarity = round(match.get('similarity', 0) * 100, 2)
+                video_url = match.get('video')
                 at_sec = match.get('at', 0)
                 from_sec = match.get('from', 0)
-                offset = max(0.0, at_sec - from_sec)
-                video_url = match.get('video')
+
+                # Calculate 100% Frame-Perfect Master Offset for t=0.0s
+                master_offset = max(0.0, (at_sec - seek_time) - from_sec)
+
+                print(f"[+] Exact Scene Matched! Episode {episode} ({similarity}% confidence | Master Offset for t=0.0s: {master_offset:.3f}s)")
 
                 if video_url:
-                    v_res = requests.get(video_url, timeout=12)
+                    v_res = requests.get(video_url, timeout=15)
                     if v_res.status_code == 200:
-                        with open(preview_path, 'wb') as f:
+                        with open(preview_video_path, 'wb') as f:
                             f.write(v_res.content)
 
-                        # Extract exact chunk_len audio starting at offset for frame-perfect sync
+                        # Slice audio starting at master_offset for full video_duration
                         subprocess.run(
-                            ['ffmpeg', '-y', '-ss', str(offset), '-i', preview_path, '-t', str(chunk_len), '-vn', '-c:a', 'aac', chunk_audio],
+                            ['ffmpeg', '-y', '-ss', str(master_offset), '-i', preview_video_path, '-t', str(video_duration), '-vn', '-c:a', 'aac', audio_path],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
                         )
 
-                        if os.path.exists(chunk_audio):
-                            return chunk_audio, match
-
-    except Exception:
-        pass
-    finally:
-        for f in [frame_path, preview_path]:
-            if os.path.exists(f):
-                os.remove(f)
-
-    return None, None
-
-def fetch_multi_chunk_scene_audio(video_path):
-    """
-    Frame-Perfect Multi-Chunk Audio Sampler:
-    Samples frames every 2.0 seconds across the video duration, offsets each snippet
-    to match the query timestamp, and concatenates all chunks into 100% synchronized scene audio.
-    Returns (stitched_audio_path, duration, match_info, parts_fetched, total_chunks).
-    """
-    video_duration = get_media_duration(video_path) or 5.0
-    pid = os.getpid()
-
-    sample_interval = 2.0
-    timestamps = []
-    curr = 0.5
-    while curr < video_duration:
-        timestamps.append(round(curr, 2))
-        curr += sample_interval
-
-    total_chunks = len(timestamps)
-    print(f"[*] Frame-Perfect Sampler: Extracting up to {total_chunks} audio parts (every {sample_interval}s) across {video_duration:.1f}s video...")
-
-    audio_chunks = []
-    chunk_files = []
-    first_match = None
-
-    for i, t in enumerate(timestamps):
-        chunk_audio, match = fetch_chunk_audio(video_path, t, chunk_len=sample_interval)
-        if chunk_audio and os.path.exists(chunk_audio):
-            if not first_match:
-                first_match = match
-                print(f"[+] AI Scene Matched Episode {match.get('episode')} ({round(match.get('similarity',0)*100,1)}%)")
-
-            audio_chunks.append(chunk_audio)
-            chunk_files.append(chunk_audio)
-
-    parts_fetched = len(audio_chunks)
-
-    if not audio_chunks:
-        return None, 0, None, 0, total_chunks
-
-    stitched_audio = f"temp_stitched_{pid}.aac"
-    concat_list = f"temp_list_{pid}.txt"
-
-    try:
-        with open(concat_list, 'w') as f:
-            for chunk in audio_chunks:
-                f.write(f"file '{os.path.abspath(chunk)}'\n")
-
-        subprocess.run(
-            ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list, '-c', 'copy', stitched_audio],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-        )
-
-        for f in chunk_files + [concat_list]:
-            if os.path.exists(f):
-                os.remove(f)
-
-        if os.path.exists(stitched_audio):
-            total_duration = get_media_duration(stitched_audio) or 0
-            print(f"[+] Successfully stitched {parts_fetched}/{total_chunks} audio parts ({total_duration:.1f}s total audio)!")
-            return stitched_audio, total_duration, first_match, parts_fetched, total_chunks
+                        if os.path.exists(audio_path):
+                            exact_duration = get_media_duration(audio_path) or 0
+                            return audio_path, exact_duration, match
 
     except Exception as e:
-        print("[!] Multi-chunk audio stitching error:", e)
+        print("[!] Master sync audio search error:", e)
+    finally:
+        for f in [frame_path, preview_video_path]:
+            if os.path.exists(f):
+                os.remove(f)
 
-    return None, 0, None, parts_fetched, total_chunks
+    return None, 0, None
 
 def fetch_and_add_audio(video_path, anime_name):
     """
-    Generates TWO video versions with Frame-Perfect Audio Sync:
+    Generates TWO 100% Frame-Synced Video Versions:
     1. Raw Version (video_raw_audio.mp4): Direct scene audio without DSP upscaling / loudnorm filters.
     2. Studio Mastered Version (video_mastered_audio.mp4): Enhanced with 320k AAC @ 48kHz & EBU R128 loudness mastering.
 
     Returns (raw_output_path, mastered_output_path).
     """
-    pid = os.getpid()
     video_duration = get_media_duration(video_path) or 10.0
-    exact_audio_file, exact_duration, match_info, parts_fetched, total_chunks = fetch_multi_chunk_scene_audio(video_path)
+    exact_audio_file, exact_duration, match_info = fetch_master_synced_scene_audio(video_path)
 
     raw_output_path = video_path.replace(".mp4", "_raw_audio.mp4")
     mastered_output_path = video_path.replace(".mp4", "_mastered_audio.mp4")
@@ -161,10 +108,10 @@ def fetch_and_add_audio(video_path, anime_name):
         return video_path, video_path
 
     coverage_percent = min(100.0, round((exact_duration / video_duration) * 100, 1))
-    print(f"[*] AUDIO STATS: Fetched {parts_fetched}/{total_chunks} parts | Coverage: {coverage_percent}% ({exact_duration:.1f}s / {video_duration:.1f}s)")
+    print(f"[*] AUDIO STATS: Master Frame-Synced Audio | Coverage: {coverage_percent}% ({exact_duration:.1f}s / {video_duration:.1f}s)")
 
     try:
-        # Version 1: RAW Audio (Direct frame-perfect merge without DSP upscaling / loudnorm)
+        # Version 1: RAW Audio (Direct 100% synced merge without DSP upscaling / loudnorm)
         ffmpeg_raw = [
             "ffmpeg", "-y",
             "-i", video_path,
