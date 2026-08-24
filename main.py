@@ -48,9 +48,9 @@ def boorurandom():
             with open(video_path, 'wb') as file: 
                 file.write(data.content)
             
-            raw_video, mastered_video = fetch_and_add_audio(video_path, animename)
+            raw_video = fetch_and_add_audio(video_path, animename)
 
-            params="Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\nRaw Audio Video: {}\nMastered Audio Video: {}\n".format(animatorname,animename,tags,posturl,raw_video,mastered_video)
+            params="Animator Name: {}\nListed Anime Name: {}\nTags: {}\nPost URL: {}\nRaw Audio Video: {}\n".format(animatorname,animename,tags,posturl,raw_video)
             print("Extracted Metadata:\n" + params)
                 
                 # time.sleep(5)
