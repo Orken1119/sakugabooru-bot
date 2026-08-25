@@ -24,33 +24,42 @@ from PIL import Image
 # -----------------------------------------------------------------------------
 def extract_lines_opencv(
     frame_bgr: np.ndarray,
-    denoise_strength: float = 75.0,
+    denoise_strength: float = 40.0,
     line_threshold: float = 0.5,
     clean_speckles: bool = True,
+    min_speckle_area: float = 4.0,
     sigma1: float = 0.6,
     sigma2: float = 1.2,
     gamma: float = 0.98,
     phi: float = 200.0,
-    use_color_dodge: bool = True
+    use_color_dodge: bool = True,
+    debug_mode: bool = False,
+    debug_dir: str = "."
 ) -> np.ndarray:
     """
-    Optimized OpenCV line art extractor that eliminates background stippling / speckle noise
-    while preserving bold character outlines.
+    Optimized OpenCV line art extractor that preserves delicate character features,
+    facial details, and thin clothing folds while removing isolated background speckles.
 
     Parameters:
     -----------
     frame_bgr : np.ndarray
         Input 3-channel BGR image [H, W, 3].
     denoise_strength : float
-        Controls bilateral pre-filter intensity (sigmaColor and sigmaSpace).
+        Controls bilateral pre-filter intensity (sigmaColor and sigmaSpace, default 40.0).
     line_threshold : float
-        Controls sensitivity to faint edges (higher values cut off background noise).
+        Controls sensitivity to faint edges.
     clean_speckles : bool
-        Enables morphological opening & small component filtering to erase isolated noise dots.
+        Enables contour-based area filtering to remove isolated noise specks without eroding thin lines.
+    min_speckle_area : float
+        Minimum pixel area threshold for contour filtering (default 4.0).
     sigma1, sigma2, gamma, phi : float
         Calibrated XDoG parameters for sharp anime line art.
     use_color_dodge : bool
         If True, applies adaptive color dodge blend for crisp manga genga lines.
+    debug_mode : bool
+        If True, saves intermediate frames at 3 key stages for visual inspection.
+    debug_dir : str
+        Directory to save diagnostic debug images.
 
     Returns:
     --------
@@ -63,12 +72,15 @@ def extract_lines_opencv(
     # 1. Convert BGR to Grayscale
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
-    # 2. Edge-Preserving Pre-Smoothing (Bilateral Filtering)
-    # Flattens digital video compression macroblocks and background color gradients
-    d_val = 9 if denoise_strength >= 50.0 else 5
-    filtered = cv2.bilateralFilter(gray, d=d_val, sigmaColor=denoise_strength, sigmaSpace=denoise_strength)
-    if denoise_strength > 60.0:
-        filtered = cv2.bilateralFilter(filtered, d=5, sigmaColor=denoise_strength * 0.7, sigmaSpace=denoise_strength * 0.7)
+    # 2. Edge-Preserving Pre-Smoothing (Lightweight Bilateral Filtering)
+    # Reduced filter strength (d=5, sigma=40) to preserve thin ink lines & facial features
+    sig = float(denoise_strength)
+    filtered = cv2.bilateralFilter(gray, d=5, sigmaColor=sig, sigmaSpace=sig)
+
+    # DEBUG STAGE 1: Saved immediately after Bilateral Filter
+    if debug_mode:
+        os.makedirs(debug_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(debug_dir, "debug_1_blurred.png"), filtered)
 
     # 3. XDoG / Color Dodge Edge Extraction
     if use_color_dodge:
@@ -91,24 +103,37 @@ def extract_lines_opencv(
         val = np.where(u < 0, 1.0, 1.0 + np.tanh(phi * u))
         sketch = (val * 255.0).clip(0, 255).astype(np.uint8)
 
-    # 4. Morphological Speckle Cleanup (Post-Processing)
+    # Save raw sketch before cleanup
+    sketch_raw = sketch.copy()
+
+    # DEBUG STAGE 2: Saved immediately after XDoG / Thresholding (before cleanup)
+    if debug_mode:
+        cv2.imwrite(os.path.join(debug_dir, "debug_2_xdog_raw.png"), sketch_raw)
+
+    # 4. Contour Area Speckle Cleanup (No Line Erosion)
     if clean_speckles:
-        # Invert so black ink lines are white (255) on black (0) for morphological operations
+        # Invert so black ink lines/speckles are white (255) on black background (0)
         sketch_inv = 255 - sketch
         
-        # 2x2 Morphological Opening (Erosion -> Dilation) to erase 1-2px stippling dots
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        sketch_inv = cv2.morphologyEx(sketch_inv, cv2.MORPH_OPEN, kernel)
+        # Find contours of all black regions
+        contours, _ = cv2.findContours(sketch_inv, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Connected Component Area Filtering (removes small isolated noise specks < 8px)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(sketch_inv, connectivity=8)
-        min_size = 8
-        for i in range(1, num_labels):
-            if stats[i, cv2.CC_STAT_AREA] < min_size:
-                sketch_inv[labels == i] = 0
+        # Fill isolated background speckles smaller than min_speckle_area (e.g. 3-5px) with black in sketch_inv (white in final sketch)
+        for c in contours:
+            if cv2.contourArea(c) < min_speckle_area:
+                cv2.drawContours(sketch_inv, [c], -1, 0, -1)
 
         # Invert back to black ink lines on solid white background
         sketch = 255 - sketch_inv
+
+    # DEBUG STAGE 3: Final cleaned image
+    if debug_mode:
+        path3 = os.path.join(debug_dir, "debug_3_final.png")
+        cv2.imwrite(path3, sketch)
+        print(f"[LineExtractor Debug] Saved diagnostic frames to '{debug_dir}':")
+        print(f"  1. {os.path.join(debug_dir, 'debug_1_blurred.png')}")
+        print(f"  2. {os.path.join(debug_dir, 'debug_2_xdog_raw.png')}")
+        print(f"  3. {path3}")
 
     return cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
 
@@ -121,9 +146,12 @@ class LineExtractor:
         self,
         method: str = "xdog",
         device: str = None,
-        denoise_strength: float = 75.0,
+        denoise_strength: float = 40.0,
         line_threshold: float = 0.5,
-        clean_speckles: bool = True
+        clean_speckles: bool = True,
+        min_speckle_area: float = 4.0,
+        debug_mode: bool = False,
+        debug_dir: str = "."
     ):
         """
         Parameters:
@@ -134,23 +162,32 @@ class LineExtractor:
         device : str
             Execution device for AI model ('cuda' or 'cpu').
         denoise_strength : float
-            Controls bilateral pre-filter intensity (default 75.0).
+            Controls bilateral pre-filter intensity (default 40.0 to protect thin lines).
         line_threshold : float
             Controls sensitivity to faint edges (default 0.5).
         clean_speckles : bool
-            Enables morphological opening & small component filtering to erase isolated noise dots (default True).
+            Enables contour area filtering to erase isolated noise dots without eroding lines (default True).
+        min_speckle_area : float
+            Minimum contour area threshold (in pixels) for speckle removal (default 4.0).
+        debug_mode : bool
+            Saves diagnostic intermediate frames if True (default False).
+        debug_dir : str
+            Directory for debug frame exports (default '.').
         """
         self.method = method.lower()
         self.device = device
         self.denoise_strength = denoise_strength
         self.line_threshold = line_threshold
         self.clean_speckles = clean_speckles
+        self.min_speckle_area = min_speckle_area
+        self.debug_mode = debug_mode
+        self.debug_dir = debug_dir
         self.detector = None
 
         if self.method == "controlnet_lineart":
             self._init_controlnet_detector()
         else:
-            print(f"[LineExtractor] Initialized Engine: Method 1 (Pure OpenCV XDoG) - Fast & Noise-Free (Denoise={self.denoise_strength}, Threshold={self.line_threshold}, CleanSpeckles={self.clean_speckles})")
+            print(f"[LineExtractor] Initialized Engine: Method 1 (Pure OpenCV XDoG) - Contour Denoising (Denoise={self.denoise_strength}, Threshold={self.line_threshold}, MinArea={self.min_speckle_area}px, Debug={self.debug_mode})")
 
     def _init_controlnet_detector(self):
         """Initializes Method 2 (ControlNet Aux LineartAnimeDetector) with graceful fallback."""
@@ -169,12 +206,14 @@ class LineExtractor:
             print("[LineExtractor] Falling back to Method 1 (Pure OpenCV XDoG)...")
             self.method = "xdog"
 
-    def process_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def process_frame(self, frame_bgr: np.ndarray, debug_mode: bool = None) -> np.ndarray:
         """
         Processes a single BGR uint8 frame [H, W, 3] and returns line art [H, W, 3].
         """
         if frame_bgr is None or frame_bgr.size == 0:
             return frame_bgr
+
+        is_debug = self.debug_mode if debug_mode is None else debug_mode
 
         if self.method == "controlnet_lineart" and self.detector is not None:
             try:
@@ -196,7 +235,10 @@ class LineExtractor:
                     frame_bgr,
                     denoise_strength=self.denoise_strength,
                     line_threshold=self.line_threshold,
-                    clean_speckles=self.clean_speckles
+                    clean_speckles=self.clean_speckles,
+                    min_speckle_area=self.min_speckle_area,
+                    debug_mode=is_debug,
+                    debug_dir=self.debug_dir
                 )
         else:
             # Method 1 Default
@@ -204,7 +246,10 @@ class LineExtractor:
                 frame_bgr,
                 denoise_strength=self.denoise_strength,
                 line_threshold=self.line_threshold,
-                clean_speckles=self.clean_speckles
+                clean_speckles=self.clean_speckles,
+                min_speckle_area=self.min_speckle_area,
+                debug_mode=is_debug,
+                debug_dir=self.debug_dir
             )
 
     # -------------------------------------------------------------------------
