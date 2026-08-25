@@ -131,6 +131,8 @@ venv.bak/
 
 token.txt
 sakugabooru-video-files
+music_cache/
+sakugabooru-episodes/
 
 # Spyder project settings
 .spyderproject
