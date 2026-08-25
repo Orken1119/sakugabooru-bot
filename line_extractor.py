@@ -20,14 +20,57 @@ from tqdm import tqdm
 from PIL import Image
 
 # -----------------------------------------------------------------------------
+# Helper: Automatic Letterbox & Black Bar Cropping
+# -----------------------------------------------------------------------------
+def auto_crop_black_bars(frame_bgr: np.ndarray, threshold: int = 15) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """
+    Detects black letterboxing/pillarboxing bars and crops the active video content area.
+
+    Parameters:
+    -----------
+    frame_bgr : np.ndarray
+        Input 3-channel BGR image [H, W, 3].
+    threshold : int
+        Luminance threshold (0-255, default 15) to separate black letterbox bars from active content.
+
+    Returns:
+    --------
+    tuple[np.ndarray, tuple[int, int, int, int]]
+        - Cropped active frame content [h_crop, w_crop, 3]
+        - Active bounding box coordinates (x, y, w, h) relative to original frame
+    """
+    if frame_bgr is None or frame_bgr.size == 0:
+        return frame_bgr, (0, 0, 0, 0)
+
+    H, W = frame_bgr.shape[:2]
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Threshold near-black pixels: active video content becomes white (255), letterbox bars stay black (0)
+    _, thresh = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+
+    non_zero = cv2.findNonZero(thresh)
+    if non_zero is not None and len(non_zero) > 0:
+        x, y, w, h = cv2.boundingRect(non_zero)
+        # Ensure bounding box is valid and not collapsed
+        if w > 20 and h > 20 and (w < W or h < H):
+            cropped = frame_bgr[y:y+h, x:x+w]
+            return cropped, (x, y, w, h)
+
+    return frame_bgr, (0, 0, W, H)
+
+
+# -----------------------------------------------------------------------------
 # Method 1: Pure OpenCV XDoG (Extended Difference of Gaussians)
 # -----------------------------------------------------------------------------
 def extract_lines_opencv(
     frame_bgr: np.ndarray,
-    denoise_strength: float = 40.0,
-    line_threshold: float = 0.5,
+    denoise_strength: float = None,
+    line_threshold: float = None,
     clean_speckles: bool = True,
-    min_speckle_area: float = 4.0,
+    min_speckle_area: float = None,
+    high_chaos_mode: bool = False,
+    auto_crop: bool = True,
+    crop_threshold: int = 15,
     sigma1: float = 0.6,
     sigma2: float = 1.2,
     gamma: float = 0.98,
@@ -37,21 +80,27 @@ def extract_lines_opencv(
     debug_dir: str = "."
 ) -> np.ndarray:
     """
-    Optimized OpenCV line art extractor that preserves delicate character features,
-    facial details, and thin clothing folds while removing isolated background speckles.
+    Optimized OpenCV line art extractor supporting automatic letterbox cropping
+    and a High-Chaos preset for grainy scenes (explosions, impact frames, speed lines).
 
     Parameters:
     -----------
     frame_bgr : np.ndarray
         Input 3-channel BGR image [H, W, 3].
     denoise_strength : float
-        Controls bilateral pre-filter intensity (sigmaColor and sigmaSpace, default 40.0).
+        Controls bilateral pre-filter intensity (default 40.0, or 60.0 in High-Chaos Mode).
     line_threshold : float
-        Controls sensitivity to faint edges.
+        Controls sensitivity to faint edges (default 0.5, or 0.80 in High-Chaos Mode).
     clean_speckles : bool
         Enables contour-based area filtering to remove isolated noise specks without eroding thin lines.
     min_speckle_area : float
-        Minimum pixel area threshold for contour filtering (default 4.0).
+        Minimum pixel area threshold for contour filtering (default 4.0, or 15.0 in High-Chaos Mode).
+    high_chaos_mode : bool
+        Enables aggressive preset against background grain & explosion particles (default False).
+    auto_crop : bool
+        Automatically crops letterbox black bars to prevent edge noise tracing (default True).
+    crop_threshold : int
+        Near-black pixel luminance threshold for letterbox detection (default 15).
     sigma1, sigma2, gamma, phi : float
         Calibrated XDoG parameters for sharp anime line art.
     use_color_dodge : bool
@@ -69,11 +118,28 @@ def extract_lines_opencv(
     if frame_bgr is None or frame_bgr.size == 0:
         raise ValueError("Invalid or empty input frame provided to extract_lines_opencv.")
 
-    # 1. Convert BGR to Grayscale
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    # High-Chaos Preset Defaults
+    if high_chaos_mode:
+        if denoise_strength is None: denoise_strength = 60.0
+        if line_threshold is None: line_threshold = 0.80
+        if min_speckle_area is None: min_speckle_area = 15.0
+    else:
+        if denoise_strength is None: denoise_strength = 40.0
+        if line_threshold is None: line_threshold = 0.50
+        if min_speckle_area is None: min_speckle_area = 4.0
 
-    # 2. Edge-Preserving Pre-Smoothing (Lightweight Bilateral Filtering)
-    # Reduced filter strength (d=5, sigma=40) to preserve thin ink lines & facial features
+    orig_H, orig_W = frame_bgr.shape[:2]
+
+    # 1. Automatic Letterbox Cropping (Pre-Processing)
+    if auto_crop:
+        active_frame, (crop_x, crop_y, crop_w, crop_h) = auto_crop_black_bars(frame_bgr, threshold=crop_threshold)
+    else:
+        active_frame, (crop_x, crop_y, crop_w, crop_h) = frame_bgr, (0, 0, orig_W, orig_H)
+
+    # 2. Convert BGR to Grayscale
+    gray = cv2.cvtColor(active_frame, cv2.COLOR_BGR2GRAY)
+
+    # 3. Edge-Preserving Pre-Smoothing (Bilateral Filtering)
     sig = float(denoise_strength)
     filtered = cv2.bilateralFilter(gray, d=5, sigmaColor=sig, sigmaSpace=sig)
 
@@ -82,7 +148,7 @@ def extract_lines_opencv(
         os.makedirs(debug_dir, exist_ok=True)
         cv2.imwrite(os.path.join(debug_dir, "debug_1_blurred.png"), filtered)
 
-    # 3. XDoG / Color Dodge Edge Extraction
+    # 4. XDoG / Color Dodge Edge Extraction
     if use_color_dodge:
         inv_gray = 255 - filtered
         blur = cv2.GaussianBlur(inv_gray, (21, 21), 0)
@@ -110,7 +176,7 @@ def extract_lines_opencv(
     if debug_mode:
         cv2.imwrite(os.path.join(debug_dir, "debug_2_xdog_raw.png"), sketch_raw)
 
-    # 4. Contour Area Speckle Cleanup (No Line Erosion)
+    # 5. Contour Area Speckle Cleanup (No Line Erosion)
     if clean_speckles:
         # Invert so black ink lines/speckles are white (255) on black background (0)
         sketch_inv = 255 - sketch
@@ -118,13 +184,19 @@ def extract_lines_opencv(
         # Find contours of all black regions
         contours, _ = cv2.findContours(sketch_inv, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Fill isolated background speckles smaller than min_speckle_area (e.g. 3-5px) with black in sketch_inv (white in final sketch)
+        # Fill isolated background speckles smaller than min_speckle_area with black in sketch_inv (white in final sketch)
         for c in contours:
             if cv2.contourArea(c) < min_speckle_area:
                 cv2.drawContours(sketch_inv, [c], -1, 0, -1)
 
         # Invert back to black ink lines on solid white background
         sketch = 255 - sketch_inv
+
+    # 6. Re-pad to Original Canvas Dimensions (Replaces letterbox black bars with pure white margins)
+    if auto_crop and (crop_w < orig_W or crop_h < orig_H):
+        full_sketch = np.full((orig_H, orig_W), 255, dtype=np.uint8)
+        full_sketch[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w] = sketch
+        sketch = full_sketch
 
     # DEBUG STAGE 3: Final cleaned image
     if debug_mode:
@@ -146,10 +218,13 @@ class LineExtractor:
         self,
         method: str = "xdog",
         device: str = None,
-        denoise_strength: float = 40.0,
-        line_threshold: float = 0.5,
+        denoise_strength: float = None,
+        line_threshold: float = None,
         clean_speckles: bool = True,
-        min_speckle_area: float = 4.0,
+        min_speckle_area: float = None,
+        high_chaos_mode: bool = False,
+        auto_crop: bool = True,
+        crop_threshold: int = 15,
         debug_mode: bool = False,
         debug_dir: str = "."
     ):
@@ -162,13 +237,19 @@ class LineExtractor:
         device : str
             Execution device for AI model ('cuda' or 'cpu').
         denoise_strength : float
-            Controls bilateral pre-filter intensity (default 40.0 to protect thin lines).
+            Controls bilateral pre-filter intensity (default 40.0, or 60.0 in High-Chaos Mode).
         line_threshold : float
-            Controls sensitivity to faint edges (default 0.5).
+            Controls sensitivity to faint edges (default 0.5, or 0.80 in High-Chaos Mode).
         clean_speckles : bool
             Enables contour area filtering to erase isolated noise dots without eroding lines (default True).
         min_speckle_area : float
-            Minimum contour area threshold (in pixels) for speckle removal (default 4.0).
+            Minimum contour area threshold for speckle removal (default 4.0, or 15.0 in High-Chaos Mode).
+        high_chaos_mode : bool
+            Enables aggressive preset against background grain & explosion particles (default False).
+        auto_crop : bool
+            Automatically crops letterbox black bars (default True).
+        crop_threshold : int
+            Luminance threshold for letterbox detection (default 15).
         debug_mode : bool
             Saves diagnostic intermediate frames if True (default False).
         debug_dir : str
@@ -176,18 +257,27 @@ class LineExtractor:
         """
         self.method = method.lower()
         self.device = device
-        self.denoise_strength = denoise_strength
-        self.line_threshold = line_threshold
+        self.high_chaos_mode = high_chaos_mode
+        self.auto_crop = auto_crop
+        self.crop_threshold = crop_threshold
         self.clean_speckles = clean_speckles
-        self.min_speckle_area = min_speckle_area
         self.debug_mode = debug_mode
         self.debug_dir = debug_dir
         self.detector = None
 
+        if self.high_chaos_mode:
+            self.denoise_strength = 60.0 if denoise_strength is None else denoise_strength
+            self.line_threshold = 0.80 if line_threshold is None else line_threshold
+            self.min_speckle_area = 15.0 if min_speckle_area is None else min_speckle_area
+        else:
+            self.denoise_strength = 40.0 if denoise_strength is None else denoise_strength
+            self.line_threshold = 0.50 if line_threshold is None else line_threshold
+            self.min_speckle_area = 4.0 if min_speckle_area is None else min_speckle_area
+
         if self.method == "controlnet_lineart":
             self._init_controlnet_detector()
         else:
-            print(f"[LineExtractor] Initialized Engine: Method 1 (Pure OpenCV XDoG) - Contour Denoising (Denoise={self.denoise_strength}, Threshold={self.line_threshold}, MinArea={self.min_speckle_area}px, Debug={self.debug_mode})")
+            print(f"[LineExtractor] Initialized Engine: Method 1 (Pure OpenCV XDoG) - Contour Denoising (ChaosMode={self.high_chaos_mode}, Denoise={self.denoise_strength}, Threshold={self.line_threshold}, MinArea={self.min_speckle_area}px, AutoCrop={self.auto_crop})")
 
     def _init_controlnet_detector(self):
         """Initializes Method 2 (ControlNet Aux LineartAnimeDetector) with graceful fallback."""
@@ -237,6 +327,9 @@ class LineExtractor:
                     line_threshold=self.line_threshold,
                     clean_speckles=self.clean_speckles,
                     min_speckle_area=self.min_speckle_area,
+                    high_chaos_mode=self.high_chaos_mode,
+                    auto_crop=self.auto_crop,
+                    crop_threshold=self.crop_threshold,
                     debug_mode=is_debug,
                     debug_dir=self.debug_dir
                 )
@@ -248,6 +341,9 @@ class LineExtractor:
                 line_threshold=self.line_threshold,
                 clean_speckles=self.clean_speckles,
                 min_speckle_area=self.min_speckle_area,
+                high_chaos_mode=self.high_chaos_mode,
+                auto_crop=self.auto_crop,
+                crop_threshold=self.crop_threshold,
                 debug_mode=is_debug,
                 debug_dir=self.debug_dir
             )
