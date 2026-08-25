@@ -24,38 +24,38 @@ from PIL import Image
 # -----------------------------------------------------------------------------
 def extract_lines_opencv(
     frame_bgr: np.ndarray,
-    sigma1: float = 0.8,
-    sigma2: float = 1.6,
+    denoise_strength: float = 75.0,
+    line_threshold: float = 0.5,
+    clean_speckles: bool = True,
+    sigma1: float = 0.6,
+    sigma2: float = 1.2,
     gamma: float = 0.98,
     phi: float = 200.0,
-    epsilon: float = -0.1,
     use_color_dodge: bool = True
 ) -> np.ndarray:
     """
-    Extracts clean, crisp pencil-like anime outlines on a white background using
-    Extended Difference of Gaussians (XDoG) / Color Dodge filtering.
+    Optimized OpenCV line art extractor that eliminates background stippling / speckle noise
+    while preserving bold character outlines.
 
     Parameters:
     -----------
     frame_bgr : np.ndarray
         Input 3-channel BGR image [H, W, 3].
-    sigma1 : float
-        Sigma for primary Gaussian blur.
-    sigma2 : float
-        Sigma for secondary Gaussian blur.
-    gamma : float
-        Scalar scale factor for Difference of Gaussians (0.95 - 0.99).
-    phi : float
-        Soft thresholding sharpness scale for XDoG hyperbolic tangent.
-    epsilon : float
-        Threshold offset for edge sensitivity.
+    denoise_strength : float
+        Controls bilateral pre-filter intensity (sigmaColor and sigmaSpace).
+    line_threshold : float
+        Controls sensitivity to faint edges (higher values cut off background noise).
+    clean_speckles : bool
+        Enables morphological opening & small component filtering to erase isolated noise dots.
+    sigma1, sigma2, gamma, phi : float
+        Calibrated XDoG parameters for sharp anime line art.
     use_color_dodge : bool
-        If True, combines XDoG with adaptive color dodge for sharp manga/genga lines.
+        If True, applies adaptive color dodge blend for crisp manga genga lines.
 
     Returns:
     --------
     np.ndarray
-        Clean 3-channel BGR uint8 image [H, W, 3].
+        Clean 3-channel BGR uint8 image [H, W, 3] (black ink on pure white background).
     """
     if frame_bgr is None or frame_bgr.size == 0:
         raise ValueError("Invalid or empty input frame provided to extract_lines_opencv.")
@@ -63,30 +63,53 @@ def extract_lines_opencv(
     # 1. Convert BGR to Grayscale
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
-    # 2. Bilateral Filter / Median Blur to remove digital compression artifacts & flat noise
-    filtered = cv2.bilateralFilter(gray, d=5, sigmaColor=50, sigmaSpace=50)
+    # 2. Edge-Preserving Pre-Smoothing (Bilateral Filtering)
+    # Flattens digital video compression macroblocks and background color gradients
+    d_val = 9 if denoise_strength >= 50.0 else 5
+    filtered = cv2.bilateralFilter(gray, d=d_val, sigmaColor=denoise_strength, sigmaSpace=denoise_strength)
+    if denoise_strength > 60.0:
+        filtered = cv2.bilateralFilter(filtered, d=5, sigmaColor=denoise_strength * 0.7, sigmaSpace=denoise_strength * 0.7)
 
+    # 3. XDoG / Color Dodge Edge Extraction
     if use_color_dodge:
-        # High-contrast Color Dodge + Adaptive Thresholding (Crisp Manga/Genga lines)
         inv_gray = 255 - filtered
         blur = cv2.GaussianBlur(inv_gray, (21, 21), 0)
         dodge = cv2.divide(filtered, np.maximum(255 - blur, 1), scale=256.0)
+        
+        c_val = max(1, int(2.0 * line_threshold + 1.0))
         sketch = cv2.adaptiveThreshold(
             dodge, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
+            cv2.THRESH_BINARY, 11, c_val
         )
     else:
-        # Pure XDoG Hyperbolic Tangent Edge Extraction
         g1 = cv2.GaussianBlur(filtered.astype(np.float32), (0, 0), sigma1)
         g2 = cv2.GaussianBlur(filtered.astype(np.float32), (0, 0), sigma2)
         dog = g1 - gamma * g2
 
-        # Hyperbolic tangent soft thresholding
+        epsilon = -0.1 * (1.0 / max(0.1, line_threshold))
         u = dog - epsilon
         val = np.where(u < 0, 1.0, 1.0 + np.tanh(phi * u))
         sketch = (val * 255.0).clip(0, 255).astype(np.uint8)
 
-    # Return clean 3-channel BGR frame [H, W, 3]
+    # 4. Morphological Speckle Cleanup (Post-Processing)
+    if clean_speckles:
+        # Invert so black ink lines are white (255) on black (0) for morphological operations
+        sketch_inv = 255 - sketch
+        
+        # 2x2 Morphological Opening (Erosion -> Dilation) to erase 1-2px stippling dots
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        sketch_inv = cv2.morphologyEx(sketch_inv, cv2.MORPH_OPEN, kernel)
+        
+        # Connected Component Area Filtering (removes small isolated noise specks < 8px)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(sketch_inv, connectivity=8)
+        min_size = 8
+        for i in range(1, num_labels):
+            if stats[i, cv2.CC_STAT_AREA] < min_size:
+                sketch_inv[labels == i] = 0
+
+        # Invert back to black ink lines on solid white background
+        sketch = 255 - sketch_inv
+
     return cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
 
 
@@ -94,7 +117,14 @@ def extract_lines_opencv(
 # LineExtractor Main Class (Supports Method 1 and Method 2)
 # -----------------------------------------------------------------------------
 class LineExtractor:
-    def __init__(self, method: str = "xdog", device: str = None):
+    def __init__(
+        self,
+        method: str = "xdog",
+        device: str = None,
+        denoise_strength: float = 75.0,
+        line_threshold: float = 0.5,
+        clean_speckles: bool = True
+    ):
         """
         Parameters:
         -----------
@@ -103,15 +133,24 @@ class LineExtractor:
             'controlnet_lineart' (Method 2: High-End ControlNet Aux AI Detector)
         device : str
             Execution device for AI model ('cuda' or 'cpu').
+        denoise_strength : float
+            Controls bilateral pre-filter intensity (default 75.0).
+        line_threshold : float
+            Controls sensitivity to faint edges (default 0.5).
+        clean_speckles : bool
+            Enables morphological opening & small component filtering to erase isolated noise dots (default True).
         """
         self.method = method.lower()
         self.device = device
+        self.denoise_strength = denoise_strength
+        self.line_threshold = line_threshold
+        self.clean_speckles = clean_speckles
         self.detector = None
 
         if self.method == "controlnet_lineart":
             self._init_controlnet_detector()
         else:
-            print("[LineExtractor] Initialized Engine: Method 1 (Pure OpenCV XDoG) - Fast & Deterministic")
+            print(f"[LineExtractor] Initialized Engine: Method 1 (Pure OpenCV XDoG) - Fast & Noise-Free (Denoise={self.denoise_strength}, Threshold={self.line_threshold}, CleanSpeckles={self.clean_speckles})")
 
     def _init_controlnet_detector(self):
         """Initializes Method 2 (ControlNet Aux LineartAnimeDetector) with graceful fallback."""
@@ -153,10 +192,20 @@ class LineExtractor:
                 return cv2.cvtColor(res_np, cv2.COLOR_RGB2BGR)
             except Exception as err:
                 print(f"[LineExtractor Warning] ControlNet Aux frame error: {err}. Using XDoG fallback.")
-                return extract_lines_opencv(frame_bgr)
+                return extract_lines_opencv(
+                    frame_bgr,
+                    denoise_strength=self.denoise_strength,
+                    line_threshold=self.line_threshold,
+                    clean_speckles=self.clean_speckles
+                )
         else:
             # Method 1 Default
-            return extract_lines_opencv(frame_bgr)
+            return extract_lines_opencv(
+                frame_bgr,
+                denoise_strength=self.denoise_strength,
+                line_threshold=self.line_threshold,
+                clean_speckles=self.clean_speckles
+            )
 
     # -------------------------------------------------------------------------
     # Mode B: Streaming Generator
