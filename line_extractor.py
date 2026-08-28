@@ -68,6 +68,7 @@ def extract_lines_opencv(
     line_threshold: float = None,
     clean_speckles: bool = True,
     min_speckle_area: float = None,
+    max_solidity: float = 0.70,
     high_chaos_mode: bool = False,
     auto_crop: bool = True,
     crop_threshold: int = 15,
@@ -75,28 +76,42 @@ def extract_lines_opencv(
     sigma2: float = 1.2,
     gamma: float = 0.98,
     phi: float = 200.0,
-    use_color_dodge: bool = True,
+    use_color_dodge: bool = False,
     debug_mode: bool = False,
     debug_dir: str = "."
 ) -> np.ndarray:
     """
-    Optimized OpenCV line art extractor supporting automatic letterbox cropping
-    and a High-Chaos preset for grainy scenes (explosions, impact frames, speed lines).
+    Two-Stage OpenCV line art extractor enforcing strict C-contiguous linear memory,
+    lightweight macroblock shielding, XDoG edge detection, and Connected Component
+    Analysis (CCA) density/solidity filtering.
+
+    Stage 1: Minimal-Interference Raw Line Generation
+      - Convert BGR to Grayscale.
+      - Apply lightweight Bilateral Filter (d=5, sigmaColor=25, sigmaSpace=25).
+      - XDoG + thresholding to produce binary raw sketch (black lines on white background).
+
+    Stage 2: Smart Post-Processing via Connected Component Analysis (CCA)
+      - Invert Stage 1 binary mask (white lines on black background).
+      - Run cv2.connectedComponentsWithStats.
+      - Filter specks by area (< min_speckle_area) and dense noise by solidity (> max_solidity).
+      - Reconstruct clean binary sketch and invert back (black lines on white background).
 
     Parameters:
     -----------
     frame_bgr : np.ndarray
         Input 3-channel BGR image [H, W, 3].
     denoise_strength : float
-        Controls bilateral pre-filter intensity (default 40.0, or 60.0 in High-Chaos Mode).
+        Unused override for bilateral filter (fixed d=5, sigma=25 for minimal line interference).
     line_threshold : float
-        Controls sensitivity to faint edges (default 0.5, or 0.80 in High-Chaos Mode).
+        Controls sensitivity to faint edges (default 0.50, or 0.80 in High-Chaos Mode).
     clean_speckles : bool
-        Enables contour-based area filtering to remove isolated noise specks without eroding thin lines.
+        Enables Stage 2 CCA filtering (default True).
     min_speckle_area : float
-        Minimum pixel area threshold for contour filtering (default 4.0, or 15.0 in High-Chaos Mode).
+        Minimum pixel area threshold for isolated specks (default 10.0, or 15.0 in High-Chaos Mode).
+    max_solidity : float
+        Maximum allowed bounding box density ratio (area / (w * h)) before component is erased (default 0.60).
     high_chaos_mode : bool
-        Enables aggressive preset against background grain & explosion particles (default False).
+        Enables preset against background grain & explosion particles (default False).
     auto_crop : bool
         Automatically crops letterbox black bars to prevent edge noise tracing (default True).
     crop_threshold : int
@@ -104,7 +119,7 @@ def extract_lines_opencv(
     sigma1, sigma2, gamma, phi : float
         Calibrated XDoG parameters for sharp anime line art.
     use_color_dodge : bool
-        If True, applies adaptive color dodge blend for crisp manga genga lines.
+        If True, applies adaptive color dodge blend for manga genga lines.
     debug_mode : bool
         If True, saves intermediate frames at 3 key stages for visual inspection.
     debug_dir : str
@@ -118,44 +133,43 @@ def extract_lines_opencv(
     if frame_bgr is None or frame_bgr.size == 0:
         raise ValueError("Invalid or empty input frame provided to extract_lines_opencv.")
 
-    # High-Chaos Preset Defaults
+    # High-Chaos & Default Presets
     if high_chaos_mode:
-        if denoise_strength is None: denoise_strength = 60.0
         if line_threshold is None: line_threshold = 0.80
         if min_speckle_area is None: min_speckle_area = 15.0
     else:
-        if denoise_strength is None: denoise_strength = 40.0
         if line_threshold is None: line_threshold = 0.50
-        if min_speckle_area is None: min_speckle_area = 4.0
+        if min_speckle_area is None: min_speckle_area = 10.0
 
     orig_H, orig_W = frame_bgr.shape[:2]
 
-    # 1. Automatic Letterbox Cropping (Pre-Processing)
+    # Pre-Processing: Automatic Letterbox Cropping
     if auto_crop:
         active_frame, (crop_x, crop_y, crop_w, crop_h) = auto_crop_black_bars(frame_bgr, threshold=crop_threshold)
     else:
         active_frame, (crop_x, crop_y, crop_w, crop_h) = frame_bgr, (0, 0, orig_W, orig_H)
 
-    # 2. Convert BGR to Grayscale
+    # =========================================================================
+    # STAGE 1: Minimal-Interference Raw Line Generation
+    # =========================================================================
+    # 1. Convert BGR to Grayscale
     gray = cv2.cvtColor(active_frame, cv2.COLOR_BGR2GRAY)
 
-    # 3. Edge-Preserving Pre-Smoothing (Bilateral Filtering)
-    sig = float(denoise_strength)
-    filtered = cv2.bilateralFilter(gray, d=5, sigmaColor=sig, sigmaSpace=sig)
+    # 2. Lightweight Bilateral Filter (d=5, sigma=25) to shield MP4 macroblocking
+    filtered = cv2.bilateralFilter(gray, d=5, sigmaColor=25, sigmaSpace=25)
 
     # DEBUG STAGE 1: Saved immediately after Bilateral Filter
     if debug_mode:
         os.makedirs(debug_dir, exist_ok=True)
         cv2.imwrite(os.path.join(debug_dir, "debug_1_blurred.png"), filtered)
 
-    # 4. XDoG / Color Dodge Edge Extraction
+    # 3. XDoG (Difference of Gaussians) & Thresholding
     if use_color_dodge:
         inv_gray = 255 - filtered
         blur = cv2.GaussianBlur(inv_gray, (21, 21), 0)
         dodge = cv2.divide(filtered, np.maximum(255 - blur, 1), scale=256.0)
-        
         c_val = max(1, int(2.0 * line_threshold + 1.0))
-        sketch = cv2.adaptiveThreshold(
+        raw_sketch = cv2.adaptiveThreshold(
             dodge, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, 11, c_val
         )
@@ -164,48 +178,70 @@ def extract_lines_opencv(
         g2 = cv2.GaussianBlur(filtered.astype(np.float32), (0, 0), sigma2)
         dog = g1 - gamma * g2
 
-        epsilon = -0.1 * (1.0 / max(0.1, line_threshold))
+        epsilon = float(line_threshold) if line_threshold is not None else 0.5
         u = dog - epsilon
-        val = np.where(u < 0, 1.0, 1.0 + np.tanh(phi * u))
-        sketch = (val * 255.0).clip(0, 255).astype(np.uint8)
+        val = np.where(u < 0, 1.0 + np.tanh(phi * u), 1.0)
+        raw_sketch = (val * 255.0).clip(0, 255).astype(np.uint8)
 
-    # Save raw sketch before cleanup
-    sketch_raw = sketch.copy()
+    # Convert to binary image (black lines 0 on pure white background 255)
+    _, binary_sketch = cv2.threshold(raw_sketch, 200, 255, cv2.THRESH_BINARY)
 
-    # DEBUG STAGE 2: Saved immediately after XDoG / Thresholding (before cleanup)
+    # DEBUG STAGE 2: Saved immediately after XDoG / Thresholding (Raw Stage 1 binary image)
     if debug_mode:
-        cv2.imwrite(os.path.join(debug_dir, "debug_2_xdog_raw.png"), sketch_raw)
+        os.makedirs(debug_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(debug_dir, "debug_2_xdog_raw.png"), binary_sketch)
 
-    # 5. Contour Area Speckle Cleanup (No Line Erosion)
+    # =========================================================================
+    # STAGE 2: Smart Post-Processing via Connected Component Analysis (CCA)
+    # =========================================================================
     if clean_speckles:
-        # Invert so black ink lines/speckles are white (255) on black background (0)
-        sketch_inv = 255 - sketch
-        
-        # Find contours of all black regions
-        contours, _ = cv2.findContours(sketch_inv, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Fill isolated background speckles smaller than min_speckle_area with black in sketch_inv (white in final sketch)
-        for c in contours:
-            if cv2.contourArea(c) < min_speckle_area:
-                cv2.drawContours(sketch_inv, [c], -1, 0, -1)
+        # Invert Stage 1 binary mask (white ink lines/specks 255 on black background 0)
+        inv_binary = cv2.bitwise_not(binary_sketch)
 
-        # Invert back to black ink lines on solid white background
-        sketch = 255 - sketch_inv
+        # Run Connected Component Analysis
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(inv_binary, connectivity=8)
 
-    # 6. Re-pad to Original Canvas Dimensions (Replaces letterbox black bars with pure white margins)
+        clean_inv = np.zeros_like(inv_binary)
+
+        # Iterate strictly from 1 to num_labels - 1 (ignore label 0 background)
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+
+            # Rule 1: Erase small isolated specks (< min_speckle_area, e.g. 15px)
+            if area < min_speckle_area:
+                continue
+
+            # Rule 2: Mid-sized chunky noise (area <= 100) with high solidity (> max_solidity) is erased
+            bbox_area = w * h
+            solidity = area / float(bbox_area) if bbox_area > 0 else 1.0
+
+            if area <= 100 and solidity > max_solidity:
+                continue
+
+            # Rule 3: Components > 100 pixels are ALWAYS retained regardless of solidity
+            clean_inv[labels == i] = 255
+
+        # Reconstruct final binary sketch (black lines on pure white background)
+        sketch = cv2.bitwise_not(clean_inv)
+    else:
+        sketch = binary_sketch
+
+    # Re-pad to Original Canvas Dimensions if Letterbox Cropped
     if auto_crop and (crop_w < orig_W or crop_h < orig_H):
         full_sketch = np.full((orig_H, orig_W), 255, dtype=np.uint8)
         full_sketch[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w] = sketch
         sketch = full_sketch
 
-    # DEBUG STAGE 3: Final cleaned image
+    # DEBUG STAGE 3: Final CCA Cleaned image
     if debug_mode:
         path3 = os.path.join(debug_dir, "debug_3_final.png")
         cv2.imwrite(path3, sketch)
-        print(f"[LineExtractor Debug] Saved diagnostic frames to '{debug_dir}':")
-        print(f"  1. {os.path.join(debug_dir, 'debug_1_blurred.png')}")
-        print(f"  2. {os.path.join(debug_dir, 'debug_2_xdog_raw.png')}")
-        print(f"  3. {path3}")
+        print(f"[LineExtractor Debug] Saved 3 diagnostic stages to '{debug_dir}':")
+        print(f"  1. {os.path.join(debug_dir, 'debug_1_blurred.png')} (Lightweight Bilateral Filter)")
+        print(f"  2. {os.path.join(debug_dir, 'debug_2_xdog_raw.png')} (Raw Stage 1 XDoG)")
+        print(f"  3. {path3} (Stage 2 CCA Cleaned)")
 
     return cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
 
