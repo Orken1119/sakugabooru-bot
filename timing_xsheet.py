@@ -1,9 +1,9 @@
 """
-Digital X-Sheet / Animation Timing Graph Generator (Version 5.1 Animator Edition)
+Digital X-Sheet / Animation Timing Graph Generator (Version 6.0 — Genga Paper Theme)
 ---------------------------------------------------------------------------------------------
 Analyzes anime/sakuga MP4 clips, detects frame-by-frame animation timing (Ones, Twos, Threes, Holds),
-performs automatic scene cut detection (cv2.compareHist with cooldown), computes Japanese Timesheet Page/Seconds,
-and renders a professional, ultra-crisp "Animator Edition Analysis Pane" below 100% of original animation art.
+performs automatic scene cut detection with a 12-frame cooldown, computes Japanese Timesheet Page/Seconds,
+and renders an authentic "Genga Paper" (Animation Tracing Paper) HUD Pane with 85% opacity blend.
 """
 
 import os
@@ -24,8 +24,8 @@ class DigitalXSheetProcessor:
         pane_height: int = 170,
         timeline_window: int = 48,
         border_crop_pct: float = 0.06,
-        scene_cut_threshold: float = 2.5,
-        min_frames_between_cuts: int = 15
+        scene_cut_threshold: float = 2.0,
+        min_frames_between_cuts: int = 12
     ):
         self.noise_threshold = noise_threshold
         self.diff_pixel_threshold = diff_pixel_threshold
@@ -37,12 +37,11 @@ class DigitalXSheetProcessor:
         self.min_frames_between_cuts = min_frames_between_cuts
 
         # Load crisp TrueType fonts including CJK Japanese support (NotoSansCJK)
-        self.font_title = self._load_ttf_font(20, bold=True, cjk=True)
-        self.font_bold_lg = self._load_ttf_font(18, bold=True, cjk=True)
-        self.font_bold_md = self._load_ttf_font(15, bold=True, cjk=True)
-        self.font_bold_sm = self._load_ttf_font(13, bold=True, cjk=True)
+        self.font_bold_lg = self._load_ttf_font(18, bold=True)
+        self.font_bold_md = self._load_ttf_font(15, bold=True)
+        self.font_bold_sm = self._load_ttf_font(13, bold=True)
 
-    def _load_ttf_font(self, size: int, bold: bool = True, cjk: bool = False):
+    def _load_ttf_font(self, size: int, bold: bool = True):
         font_candidates = [
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -83,12 +82,13 @@ class DigitalXSheetProcessor:
 
     def _detect_scene_cut(self, prev_hsv, curr_hsv, frame_idx: int, last_cut_frame: int) -> bool:
         """
-        Automatic Scene Cut Detection using Chi-Square HSV Histogram Distance with Cooldown.
+        1. Scene Detection (Cut Counter)
+        Hard cut detector using cv2.compareHist (cv2.HISTCMP_CHISQR).
+        Includes a 12-frame cooldown after a cut is detected to avoid false positives.
         """
         if prev_hsv is None or curr_hsv is None:
             return False
 
-        # Cooldown guard: require at least 15 frames (~0.6s) between cuts
         if (frame_idx - last_cut_frame) < self.min_frames_between_cuts:
             return False
 
@@ -103,6 +103,11 @@ class DigitalXSheetProcessor:
             return False
 
     def _classify_timing_type(self, history):
+        """
+        3. Slow-Motion Fallback
+        If a held drawing lasts longer than 4 frames, change timing status to HOLD (SLOW-MO).
+        Do not break standard 1s/2s/3s detection logic for the rest of the clip.
+        """
         if not history:
             return "HOLD", 0
 
@@ -115,7 +120,7 @@ class DigitalXSheetProcessor:
             dist = len(history) - 1 - last_draw
             if dist == 0:
                 return "KEY DRAWING", 1
-            elif dist > 5:
+            elif dist > 4:
                 return f"HOLD (SLOW-MO {dist}f)", dist
             return f"HOLD ({dist}f)", dist
 
@@ -130,7 +135,7 @@ class DigitalXSheetProcessor:
             return "ON 3s (8 FPS)", 3
         elif recent_spacing == 4:
             return "ON 4s (6 FPS)", 4
-        elif recent_spacing > 5:
+        elif recent_spacing > 4:
             return f"HOLD (SLOW-MO {recent_spacing}f)", recent_spacing
         else:
             return f"ON {recent_spacing}s", recent_spacing
@@ -171,8 +176,8 @@ class DigitalXSheetProcessor:
         crop_x = int(width * self.border_crop_pct)
         valid_area = max(1, (height - 2 * crop_y) * (width - 2 * crop_x))
 
-        print(f"[X-Sheet Engine V5.1 Animator Edition] Processing '{input_path}'...")
-        print(f" Resolution: {width}x{height} | Expanded Canvas: {width}x{output_height} (+{pane_h}px pane)")
+        print(f"[X-Sheet Engine V6.0 Genga Paper Theme] Processing '{input_path}'...")
+        print(f" Art Resolution: {width}x{height} | Expanded Canvas: {width}x{output_height} (+{pane_h}px Genga Paper pane)")
         print(f" FPS: {fps:.2f} | Total Frames: {total_frames}")
 
         while True:
@@ -184,7 +189,7 @@ class DigitalXSheetProcessor:
             gray_blur = cv2.GaussianBlur(gray, (5, 5), 0)
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-            # Check for scene cut with cooldown guard
+            # Scene cut detection with 12-frame cooldown
             if self._detect_scene_cut(prev_hsv, hsv, frame_idx, last_cut_frame):
                 cut_idx += 1
                 last_cut_frame = frame_idx
@@ -220,12 +225,12 @@ class DigitalXSheetProcessor:
             current_timing, spacing = self._classify_timing_type(drawing_history[-24:])
             timing_labels.append(current_timing)
 
-            # Build Expanded Canvas: Top = 100% Unobscured Art, Bottom = Animator Analysis Pane
             canvas = np.zeros((output_height, width, 3), dtype=np.uint8)
             canvas[0:height, 0:width] = frame
 
-            self._render_animator_analysis_pane(
+            self._render_genga_paper_pane(
                 canvas=canvas,
+                frame=frame,
                 art_height=height,
                 pane_height=pane_h,
                 width=width,
@@ -287,9 +292,10 @@ class DigitalXSheetProcessor:
 
         return output_path
 
-    def _render_animator_analysis_pane(
+    def _render_genga_paper_pane(
         self,
         canvas,
+        frame,
         art_height,
         pane_height,
         width,
@@ -304,64 +310,85 @@ class DigitalXSheetProcessor:
         drawing_history
     ):
         """
-        Renders a Clean, Non-Overlapping Animator Edition HUD Pane with CJK Japanese Font Support.
+        4. "Genga Paper" UI Redesign (OpenCV BGR & PIL TrueType)
+        - Paper Background (BGR: 225, 238, 242)
+        - Graphite Text/Lines (BGR: 65, 65, 65)
+        - Animation Blue (BGR: 210, 150, 70)
+        - Animation Red (BGR: 80, 80, 220)
+        - Tracing Paper Blend: cv2.addWeighted (85% paper + 15% original frame)
         """
         pane_y1 = art_height
         pane_y2 = art_height + pane_height
 
-        pane_bgr = np.zeros((pane_height, width, 3), dtype=np.uint8)
-        pane_bgr[:] = (10, 12, 18)  # OLED Deep Dark Slate
+        # Extract bottom ROI of current animation frame for tracing paper blend
+        bottom_art = cv2.resize(frame, (width, pane_height))
 
-        # Top Gold Accent Line
-        cv2.line(pane_bgr, (0, 0), (width, 0), (0, 210, 255), 3)
+        # Create Solid Genga Paper Off-White Background (BGR: 225, 238, 242)
+        paper_bgr = np.full((pane_height, width, 3), (225, 238, 242), dtype=np.uint8)
 
+        # Tracing Paper Blending: 85% Paper + 15% Original Art
+        pane_bgr = cv2.addWeighted(paper_bgr, 0.85, bottom_art, 0.15, 0)
+
+        # Top Red Accent Pencil Border
+        cv2.line(pane_bgr, (0, 0), (width, 0), (80, 80, 220), 3)
+
+        # Convert to PIL RGB for TrueType CJK rendering
         pane_rgb = cv2.cvtColor(pane_bgr, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(pane_rgb)
         draw = ImageDraw.Draw(pil_img)
 
+        # Colors in RGB format for PIL
+        RGB_GRAPHITE = (65, 65, 65)
+        RGB_ANIMATION_BLUE = (70, 150, 210)
+        RGB_ANIMATION_RED = (220, 80, 80)
+        RGB_GOLD = (230, 180, 0)
+        RGB_LIME = (40, 190, 80)
+        RGB_GRAY_HOLD = (110, 115, 125)
+
         # -------------------------------------------------------------
-        # Left Panel: Japanese Timesheet Page/Sec & Frame Counter
+        # 2. Japanese Timesheet Math & Header
         # -------------------------------------------------------------
         sheet_page = (frame_idx // 144) + 1
         sheet_sec = ((frame_idx % 144) // 24) + 1
         curr_frame_num = frame_idx + 1
 
         margin_x = 20
-        start_y = 16
+        start_y = 14
 
-        # 1. Header: Compact non-overlapping text string
-        header_str = f"SHEET P.{sheet_page} ({sheet_sec:02d}/06s)   |   CUT: #{cut_idx:02d}   |   FRM: {curr_frame_num:04d}/{total_frames:04d}"
-        draw.text((margin_x, start_y), header_str, fill=(240, 245, 250), font=self.font_bold_sm)
+        header_text = f"SHEET P.{sheet_page} ({sheet_sec:02d}/06s)   |   CUT: #{cut_idx:02d}   |   FRAME: {curr_frame_num:04d} / {total_frames:04d}"
+        draw.text((margin_x, start_y), header_text, fill=RGB_GRAPHITE, font=self.font_bold_md)
 
-        # 2. Dynamic Timing Badge (High-Alarm Color Rules)
+        # -------------------------------------------------------------
+        # Dynamic Timing Badge (Genga Paper Style)
+        # -------------------------------------------------------------
         badge_y = start_y + 28
         badge_w, badge_h = 240, 32
 
         if "1s" in current_timing:
-            badge_bg = (255, 30, 50)       # GLARED RED for 1s (24 FPS)
+            badge_bg = RGB_ANIMATION_RED
             badge_fg = (255, 255, 255)
             badge_text = "TIMING: ON 1s (24 FPS)"
         elif "2s" in current_timing:
-            badge_bg = (255, 210, 0)       # BRIGHT GOLD for 2s (12 FPS)
+            badge_bg = RGB_GOLD
             badge_fg = (10, 10, 10)
             badge_text = "TIMING: ON 2s (12 FPS)"
         elif "3s" in current_timing:
-            badge_bg = (0, 230, 120)       # NEON LIME for 3s (8 FPS)
-            badge_fg = (10, 10, 10)
+            badge_bg = RGB_LIME
+            badge_fg = (255, 255, 255)
             badge_text = "TIMING: ON 3s (8 FPS)"
         elif "KEY" in current_timing:
-            badge_bg = (255, 140, 0)       # BRIGHT ORANGE for Key Drawing
+            badge_bg = (240, 130, 20)
             badge_fg = (255, 255, 255)
             badge_text = "KEY DRAWING DETECTED"
         else:
-            badge_bg = (70, 80, 95)        # Slate Gray for Hold
-            badge_fg = (240, 240, 240)
+            badge_bg = RGB_GRAY_HOLD
+            badge_fg = (255, 255, 255)
             badge_text = f"TIMING: {current_timing}"
 
         draw.rectangle([margin_x, badge_y, margin_x + badge_w, badge_y + badge_h], fill=badge_bg)
         draw.text((margin_x + 10, badge_y + 6), badge_text, fill=badge_fg, font=self.font_bold_sm)
 
-        # 3. Clean Layout Camera Pan Tracker
+        # Camera Pan Status
         if pan_mag > 0.8:
             if abs(shift_x) > abs(shift_y):
                 pan_dir = "PAN RIGHT" if shift_x > 0 else "PAN LEFT"
@@ -371,11 +398,10 @@ class DigitalXSheetProcessor:
         else:
             pan_text = "CAM PAN: STATIC"
 
-        draw.text((margin_x, badge_y + badge_h + 12), pan_text, fill=(170, 185, 205), font=self.font_bold_sm)
+        draw.text((margin_x, badge_y + badge_h + 12), pan_text, fill=RGB_GRAPHITE, font=self.font_bold_sm)
 
         # -------------------------------------------------------------
-        # Right Panel: DIGITAL X-SHEET TIMELINE (Koma-uchi コマ打ち)
-        # Positioned with generous left offset to prevent text overlap!
+        # Right Panel: Genga Paper Koma-uchi Timeline (コマ打ち)
         # -------------------------------------------------------------
         timeline_x1 = int(width * 0.48)
         timeline_w = int(width * 0.48)
@@ -386,41 +412,49 @@ class DigitalXSheetProcessor:
         num_cells = self.timeline_window
         cell_w = max(5, timeline_w // num_cells)
 
-        # Timeline Header with rendering Japanese Katakana (コマ打ち)
-        draw.text((timeline_x1, timeline_y - 20), "DIGITAL X-SHEET TIMELINE  •  コマ打ち (KOMA-UCHI)", fill=(200, 210, 225), font=self.font_bold_sm)
+        # Header Title with Japanese Katakana (コマ打ち)
+        draw.text((timeline_x1, timeline_y - 20), "DIGITAL X-SHEET TIMELINE  •  コマ打ち (KOMA-UCHI)", fill=RGB_GRAPHITE, font=self.font_bold_sm)
 
-        # Outer Track Box
+        # Outer Graphite Grid Frame
         track_x2 = timeline_x1 + num_cells * cell_w
-        draw.rectangle([timeline_x1, timeline_y, track_x2, timeline_y + cell_h], fill=(22, 28, 42), outline=(70, 85, 110), width=2)
+        draw.rectangle([timeline_x1, timeline_y, track_x2, timeline_y + cell_h], fill=(238, 245, 248), outline=RGB_GRAPHITE, width=2)
 
-        # Render Timeline Block Holds
+        # Draw Grid Cells & Holds in Animation Blue with graphite grid margin
         for i in range(len(recent_drawings)):
             cx = timeline_x1 + i * cell_w
             is_draw = recent_drawings[i] == 1
 
+            # Grid Cell Divider
+            draw.line([(cx, timeline_y), (cx, timeline_y + cell_h)], fill=(180, 185, 195), width=1)
+
             if is_draw:
-                bar_color = (255, 210, 0) if i == len(recent_drawings) - 1 else (230, 180, 0)
-                draw.rectangle([cx + 1, timeline_y + 3, cx + cell_w - 1, timeline_y + cell_h - 3], fill=bar_color)
+                fill_color = RGB_ANIMATION_RED if i == len(recent_drawings) - 1 else RGB_ANIMATION_BLUE
+                # Leave a 2px margin so underlying graphite grid remains visible
+                draw.rectangle([cx + 2, timeline_y + 3, cx + cell_w - 2, timeline_y + cell_h - 3], fill=fill_color)
             else:
-                draw.line([(cx + cell_w // 2, timeline_y + cell_h // 2 - 2), (cx + cell_w // 2, timeline_y + cell_h // 2 + 2)], fill=(90, 105, 125), width=2)
+                # Hold dot in graphite
+                draw.line([(cx + cell_w // 2, timeline_y + cell_h // 2 - 2), (cx + cell_w // 2, timeline_y + cell_h // 2 + 2)], fill=RGB_GRAPHITE, width=2)
 
-        # Active Frame Cursor Highlight
+        # Highlight Current Frame Outline in Animation Red
         curr_cx = timeline_x1 + (len(recent_drawings) - 1) * cell_w
-        draw.rectangle([curr_cx - 2, timeline_y - 3, curr_cx + cell_w + 2, timeline_y + cell_h + 3], outline=(0, 255, 120), width=3)
+        draw.rectangle([curr_cx - 2, timeline_y - 3, curr_cx + cell_w + 2, timeline_y + cell_h + 3], outline=RGB_ANIMATION_RED, width=3)
 
-        # Place pane on bottom canvas
+        # Place composite pane back onto canvas
         res_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         canvas[pane_y1:pane_y2, 0:width] = res_bgr
 
 
-def process_timing_graph(input_path: str, output_path: str):
+def process_timing_graph(input_path: str, output_path: str, cut_num: int = 1):
     processor = DigitalXSheetProcessor()
-    return processor.process_video(input_path, output_path)
+    return processor.process_video(input_path, output_path, initial_cut_num=cut_num)
+
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        inp = sys.argv[1]
-        outp = sys.argv[2] if len(sys.argv) > 2 else "output_xsheet_v5_1.mp4"
-        process_timing_graph(inp, outp)
-    else:
-        print("Usage: python3 timing_xsheet.py <input_video.mp4> [output_video.mp4]")
+    import argparse
+    parser = argparse.ArgumentParser(description="Digital X-Sheet Processor — Genga Paper Edition")
+    parser.add_argument("input", help="Path to input video MP4")
+    parser.add_argument("output", nargs="?", default="output_genga_paper.mp4", help="Path to output video MP4")
+    parser.add_argument("--cut-num", type=int, default=1, help="Starting cut number (e.g. 1 for CUT: #01)")
+    args = parser.parse_args()
+
+    process_timing_graph(args.input, args.output, cut_num=args.cut_num)
